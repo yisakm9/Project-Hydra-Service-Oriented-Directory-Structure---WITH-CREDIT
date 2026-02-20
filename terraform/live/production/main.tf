@@ -3,6 +3,22 @@ locals {
   environment  = "production"
 }
 
+# --- 0. Security: SSH Key Generation ---
+resource "tls_private_key" "pk" {
+  algorithm = "ED25519"
+}
+
+resource "aws_key_pair" "kp" {
+  key_name   = "hydra-production-key"
+  public_key = tls_private_key.pk.public_key_openssh
+}
+
+resource "local_file" "ssh_key" {
+  content  = tls_private_key.pk.private_key_openssh
+  filename = "${path.module}/../../../hydra_key.pem"
+  file_permission = "0400"
+}
+
 # --- 1. Foundation: Networking ---
 module "networking" {
   source = "../../modules/aws/networking"
@@ -92,5 +108,6 @@ module "autoscaling" {
   target_group_arns         = [module.load_balancing.target_group_arn]
   iam_instance_profile_name = module.iam.instance_profile_name
   user_data_base64          = base64encode(data.template_file.user_data.rendered)
-  instance_type             = "t4g.large"
+  instance_type             = "m7i-flex.large"
+  ssh_key_name              = aws_key_pair.kp.key_name
 }

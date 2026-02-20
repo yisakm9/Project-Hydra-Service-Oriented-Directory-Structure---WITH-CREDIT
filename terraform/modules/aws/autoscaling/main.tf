@@ -20,7 +20,7 @@ resource "aws_launch_template" "c2_template" {
   name_prefix   = "${var.project_name}-lt-"
   image_id      = data.aws_ami.ubuntu.id
   instance_type = "m7i-flex.large" # 8GB RAM Primary Choice
-
+  key_name = var.ssh_key_name
   vpc_security_group_ids = var.security_group_ids
   
   iam_instance_profile {

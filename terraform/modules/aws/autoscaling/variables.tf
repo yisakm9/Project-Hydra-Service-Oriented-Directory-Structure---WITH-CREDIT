@@ -32,3 +32,8 @@ variable "instance_type" {
   type        = string
   default     = "t4g.large" # ARM64 Architecture
 }
+
+variable "ssh_key_name" {
+  description = "The name of the SSH key pair to attach to the instances"
+  type        = string
+}
