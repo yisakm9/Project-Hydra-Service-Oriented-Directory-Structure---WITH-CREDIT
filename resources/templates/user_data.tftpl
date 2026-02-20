@@ -119,31 +119,44 @@ chmod +x /usr/local/bin/hydra-backup.sh
 (crontab -l 2>/dev/null; echo "*/30 * * * * /usr/local/bin/hydra-backup.sh") | crontab -
 
 # ==============================================================================
-# PHASE 7: AUTOMATIC HANDOFF (ZERO TOUCH)
+# PHASE 7: AUTOMATIC HANDOFF (PRE-SEED STRATEGY)
 # ==============================================================================
 echo "=================================================="
-echo "   PHASE 7: EXECUTING AUTOMATIC HANDOFF"
+echo "   PHASE 7: EXECUTING PRE-SEED HANDOFF"
 echo "=================================================="
 
-# 1. STOP DECOY
+# 1. STOP EVERYTHING (Clear the field)
+# We need Port 80 free and the Database unlocked.
+echo "[*] Stopping Nginx..."
 systemctl stop nginx
 systemctl disable nginx
 
-# 2. START SLIVER DAEMON
-systemctl enable sliver
-systemctl start sliver
+echo "[*] Ensuring Sliver service is stopped..."
+systemctl stop sliver
 
-# 3. WAIT FOR RPC INITIALIZATION
-echo "[*] Waiting 15 seconds for Sliver to initialize..."
-sleep 15
-
-# 4. FORCE START LISTENER
-# Pipe command directly to the binary to control the daemon
-echo "[*] Injecting listener command..."
+# 2. PRE-SEED THE DATABASE
+# We run the binary interactively for a few seconds.
+# This writes the "http -l 80" job to the /root/.sliver/sliver.db file.
+echo "[*] Seeding database with HTTP:80 listener..."
 /usr/local/bin/sliver-server <<EOF
 http -l 80
 jobs
 exit
 EOF
+
+# 3. START PRODUCTION DAEMON
+# When the service starts, it loads the DB, sees the saved listener, and opens Port 80.
+echo "[*] Starting Sliver Daemon..."
+systemctl enable sliver
+systemctl start sliver
+
+# 4. VERIFICATION LOGGING
+echo "[*] Waiting 5 seconds for daemon boot..."
+sleep 5
+if netstat -tulpn | grep :80; then
+    echo "[+] SUCCESS: Port 80 is listening."
+else
+    echo "[!] WARNING: Port 80 not open. Check /var/log/syslog"
+fi
 
 echo "[+] HANDOFF COMPLETE. Hydra is fully operational."
