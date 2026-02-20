@@ -1,15 +1,18 @@
 #!/bin/bash
 # -----------------------------------------------------------------------------
-# PROJECT HYDRA: RESILIENT C2 BOOTSTRAP (MK.III)
-# Architecture: Native Binary | Systemd Persistence | Phoenix Recovery
+# PROJECT HYDRA: RESILIENT C2 BOOTSTRAP (MK.III) - FINAL
 # -----------------------------------------------------------------------------
 
-# 1. SETUP LOGGING (Critical for Debugging)
+# 1. SETUP LOGGING
+# Redirects all output to /var/log/hydra-init.log for easy debugging
 exec > >(tee /var/log/hydra-init.log|logger -t user-data -s 2>/dev/console) 2>&1
 
 # 2. CONFIGURATION VARIABLES
-SLIVER_VERSION="v1.5.42" # Pinning version for stability
-SLIVER_URL="https://github.com/BishopFox/sliver/releases/download/${SLIVER_VERSION}/sliver-server_linux"
+# We use $${VAR} (double dollar) so Terraform ignores them (passes them to Bash).
+SLIVER_VERSION="v1.5.42"
+SLIVER_URL="https://github.com/BishopFox/sliver/releases/download/$${SLIVER_VERSION}/sliver-server_linux"
+
+# We use ${VAR} (single dollar) so Terraform INJECTS these values.
 S3_BUCKET_NAME="${s3_bucket_name}"
 AWS_REGION="${aws_region}"
 SQS_TASK_URL="${sqs_task_url}"
@@ -19,10 +22,10 @@ echo "[*] Hydra Bootstrap Started..."
 # ==============================================================================
 # PHASE 1: THE DECOY (INSTANT HEALTH CHECK)
 # ==============================================================================
-# We use a retry loop for apt-get because cloud boots often have lock contention
 echo "[+] Phase 1: Deploying Nginx Decoy..."
 export DEBIAN_FRONTEND=noninteractive
 
+# Robust install loop to handle cloud boot locks
 MAX_RETRIES=5
 COUNT=0
 until apt-get update && apt-get install -y nginx curl wget git net-tools unzip jq; do
@@ -56,11 +59,8 @@ unzip -q awscliv2.zip
 ./aws/install
 rm -rf aws awscliv2.zip
 
-# Verify Installation
-/usr/local/bin/aws --version
-
 # ==============================================================================
-# PHASE 3: RESOURCE OPTIMIZATION (SWAP)
+# PHASE 3: RESOURCE OPTIMIZATION
 # ==============================================================================
 echo "[+] Phase 3: Allocating 4GB Swap..."
 if [ ! -f /swapfile ]; then
@@ -74,14 +74,14 @@ fi
 # ==============================================================================
 # PHASE 4: THE BRAIN (NATIVE SLIVER BINARY)
 # ==============================================================================
-echo "[+] Phase 4: Installing Sliver ${SLIVER_VERSION}..."
+echo "[+] Phase 4: Installing Sliver $${SLIVER_VERSION}..."
 
 # Download Binary
-curl -L "$SLIVER_URL" -o /usr/local/bin/sliver-server
+curl -L "$${SLIVER_URL}" -o /usr/local/bin/sliver-server
 chmod +x /usr/local/bin/sliver-server
 
-# Create Sliver Service (Systemd) - Initially DISABLED so Nginx can own Port 80
-# This ensures the server doesn't crash on boot trying to bind a busy port.
+# Create Sliver Service (Systemd) - Initially DISABLED
+# This prevents it from fighting Nginx for Port 80 on boot
 cat <<EOF > /etc/systemd/system/sliver.service
 [Unit]
 Description=Sliver C2 Server
@@ -108,14 +108,11 @@ systemctl daemon-reload
 echo "[+] Phase 5: Restoring Identity from S3..."
 mkdir -p /root/.sliver
 
-# Attempt download
-/usr/local/bin/aws s3 cp "s3://$S3_BUCKET_NAME/backups/latest_sliver_state.tar.gz" /tmp/sliver_backup.tar.gz --region "$AWS_REGION" || true
+/usr/local/bin/aws s3 cp "s3://${s3_bucket_name}/backups/latest_sliver_state.tar.gz" /tmp/sliver_backup.tar.gz --region "${aws_region}" || true
 
 if [ -f /tmp/sliver_backup.tar.gz ]; then
     echo "[*] Backup found. Extracting..."
     tar -xzvf /tmp/sliver_backup.tar.gz -C /root/
-    # If this is a restore, we need to ensure the DB initializes correctly
-    # We run unpack just in case assets are missing
     /usr/local/bin/sliver-server unpack
 else
     echo "[!] No backup found. New installation."
@@ -128,36 +125,43 @@ fi
 echo "[+] Phase 6: Creating Helper Scripts..."
 
 # 1. Backup Script
+# We escape $TIMESTAMP as \$TIMESTAMP so it evaluates when the script runs, not now.
 cat <<EOF > /usr/local/bin/hydra-backup.sh
 #!/bin/bash
 TIMESTAMP=\$(date +%Y%m%d_%H%M%S)
 # Compression
 tar -czf /tmp/latest_sliver_state.tar.gz -C /root .sliver
 # Upload 'Latest' (For Phoenix Restore)
-/usr/local/bin/aws s3 cp /tmp/latest_sliver_state.tar.gz s3://$S3_BUCKET_NAME/backups/latest_sliver_state.tar.gz --region $AWS_REGION
+/usr/local/bin/aws s3 cp /tmp/latest_sliver_state.tar.gz s3://${s3_bucket_name}/backups/latest_sliver_state.tar.gz --region ${aws_region}
 # Upload 'History' (For Disaster Recovery)
-/usr/local/bin/aws s3 cp /tmp/latest_sliver_state.tar.gz s3://$S3_BUCKET_NAME/backups/history/sliver_state_\$TIMESTAMP.tar.gz --region $AWS_REGION
+/usr/local/bin/aws s3 cp /tmp/latest_sliver_state.tar.gz s3://${s3_bucket_name}/backups/history/sliver_state_\$TIMESTAMP.tar.gz --region ${aws_region}
 EOF
 chmod +x /usr/local/bin/hydra-backup.sh
 
-# 2. Cron Job (Every 30 Mins)
+# 2. Cron Job
 (crontab -l 2>/dev/null; echo "*/30 * * * * /usr/local/bin/hydra-backup.sh") | crontab -
 
 # 3. "GO LIVE" SCRIPT (The Magic Switch)
-# This script allows the operator to SSH in and type ONE command to swap Decoy -> C2
+# This script is what you run when you SSH in.
 cat <<EOF > /usr/local/bin/hydra-go-live
 #!/bin/bash
-echo "[*] Switching from Decoy (Nginx) to C2 (Sliver)..."
+echo "=================================================="
+echo "   PROJECT HYDRA: ACTIVATION SEQUENCE"
+echo "=================================================="
+echo "[*] Stopping Decoy (Nginx)..."
 systemctl stop nginx
+
+echo "[*] Starting Sliver Daemon..."
 systemctl enable sliver
 systemctl start sliver
-echo "[+] Sliver is running as a daemon."
-echo "[*] Waiting for initialization..."
-sleep 5
-echo "[*] Starting HTTP Listener on Port 80..."
-# We use the client to send the command to the daemon
-/usr/local/bin/sliver-server client http -l 80
-echo "[+] OPERATION LIVE. Port 80 is now serving C2 traffic."
+sleep 3
+
+echo "[+] Sliver is running."
+echo "=================================================="
+echo "INSTRUCTIONS:"
+echo "1. Type: sudo sliver-server"
+echo "2. Inside the shell, type: http -l 80"
+echo "=================================================="
 EOF
 chmod +x /usr/local/bin/hydra-go-live
 
