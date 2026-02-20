@@ -27,10 +27,11 @@ resource "aws_lb_target_group" "c2_tg" {
     path                = "/" # Ensure Sliver is configured to respond here or change path
     protocol            = "HTTP"
     matcher             = "200-499" # Accept any response code indicating the server is alive
-    interval            = 30
+    interval            = 15
     timeout             = 5
     healthy_threshold   = 2
     unhealthy_threshold = 2
+    port                = "80" # Explicitly check port 80
   }
 }
 

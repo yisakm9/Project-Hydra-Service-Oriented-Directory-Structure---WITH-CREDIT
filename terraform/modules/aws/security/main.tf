@@ -47,7 +47,7 @@ resource "aws_security_group" "c2_sg" {
   ingress {
     description     = "Traffic from ALB"
     from_port       = 80 # ALB terminates SSL, talks to EC2 on 80 or 8888
-    to_port         = 8888 # Sliver Listener Port
+    to_port         = 80 # Sliver Listener Port
     protocol        = "tcp"
     security_groups = [aws_security_group.alb_sg.id]
   }
