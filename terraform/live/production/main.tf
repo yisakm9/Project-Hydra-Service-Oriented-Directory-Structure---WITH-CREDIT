@@ -1,3 +1,12 @@
+resource "random_id" "key_suffix" {
+  byte_length = 4
+}
+
+resource "aws_key_pair" "kp" {
+  # Dynamic name prevents "Duplicate" errors
+  key_name   = "${local.project_name}-key-${random_id.key_suffix.hex}"
+  public_key = var.public_key
+}
 locals {
   project_name = "hydra"
   environment  = "production"
@@ -8,10 +17,6 @@ resource "tls_private_key" "pk" {
   algorithm = "ED25519"
 }
 
-resource "aws_key_pair" "kp" {
-  key_name   = "hydra-production-key"
-  public_key = file(var.public_key_path)
-}
 
 resource "local_file" "ssh_key" {
   content  = tls_private_key.pk.private_key_openssh

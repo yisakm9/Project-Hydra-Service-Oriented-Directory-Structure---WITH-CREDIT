@@ -26,3 +26,7 @@ variable "public_key_path" {
   type        = string
   default     = "../../../hydra_key.pub"
 }
+variable "public_key" {
+  description = "The public SSH key string"
+  type        = string
+}

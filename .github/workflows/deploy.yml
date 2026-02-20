@@ -111,6 +111,7 @@ jobs:
         env:
           TF_VAR_my_ip: ${{ secrets.ADMIN_IP_CIDR }}
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          TF_VAR_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
         run: terraform refresh
 
       - name: Terraform Plan
@@ -119,6 +120,7 @@ jobs:
         env:
           TF_VAR_my_ip: ${{ secrets.ADMIN_IP_CIDR }}
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          TF_VAR_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
         run: |
           if [ "${{ github.event.inputs.action }}" == "destroy_ephemeral" ]; then
             # Target only the "Frontend" modules, leaving Storage (S3) and Identity (IAM) intact
@@ -187,4 +189,5 @@ jobs:
         env:
           TF_VAR_my_ip: ${{ secrets.ADMIN_IP_CIDR }}
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          TF_VAR_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
         run: terraform apply -auto-approve tfplan
