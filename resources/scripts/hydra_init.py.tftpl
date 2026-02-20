@@ -37,7 +37,7 @@ class HydraZeroTouchOrchestrator:
         logging.info("--- Phase 1: Decoy & Dependencies ---")
         self.run("export DEBIAN_FRONTEND=noninteractive && apt-get update")
         self.run("apt-get install -y nginx curl wget jq unzip net-tools")
-        # Start Nginx to pass initial ALB health checks
+        # Start Nginx to pass initial ALB health checks while we build
         self.run("systemctl start nginx && systemctl enable nginx")
 
     def phase_2_docker(self):
@@ -47,7 +47,7 @@ class HydraZeroTouchOrchestrator:
             self.run("systemctl enable docker && systemctl start docker")
 
     def phase_3_supply_chain(self):
-        logging.info("--- Phase 3: Binary Fetch & S3 Restore ---")
+        logging.info("--- Phase 3: Binary Fetch, S3 Restore & Cloak Prep ---")
         # Download Binary
         url = f"https://github.com/BishopFox/sliver/releases/download/v{self.version}/sliver-server_linux"
         self.run(f"wget -q '{url}' -O {self.bin_path}")
@@ -62,6 +62,13 @@ class HydraZeroTouchOrchestrator:
         
         # Ownership Fix
         self.run("chown -R root:root /root/.sliver")
+
+        # --- CLOAKING SETUP (Critical for ALB) ---
+        # Create a decoy website so the ALB receives 200 OK instead of TCP RST
+        self.run("mkdir -p /root/.sliver/web")
+        decoy_html = "<html><body><h1>System Maintenance</h1><p>The requested resource is currently unavailable.</p></body></html>"
+        with open("/root/.sliver/web/index.html", "w") as f:
+            f.write(decoy_html)
 
     def phase_4_build_image(self):
         logging.info("--- Phase 4: Local Image Build ---")
@@ -82,15 +89,13 @@ ENTRYPOINT ["/usr/local/bin/sliver-server", "daemon"]
         self.run(f"docker build -t {self.image_name} /tmp")
 
     def phase_5_launch_and_inject(self):
-        logging.info("--- Phase 5: Zero-Touch Handoff ---")
+        logging.info("--- Phase 5: Zero-Touch Handoff & Cloak Activation ---")
         
         # 1. Kill Nginx (Release Port 80)
         self.run("systemctl stop nginx")
         self.run("systemctl disable nginx")
 
-        # 2. Launch Container (Using your PROVEN manual config)
-        # -p 80:80 : Explicit bridge mapping (Works with ALB)
-        # --privileged : Allows low-port binding without capability issues
+        # 2. Launch Container (Explicit Port Mapping)
         self.run(f"docker rm -f {self.container_name}", check=False)
         
         launch_cmd = (
@@ -106,33 +111,44 @@ ENTRYPOINT ["/usr/local/bin/sliver-server", "daemon"]
 
         # 3. Listener Injection Loop (The "Enforcer")
         logging.info("Waiting for Daemon to initialize...")
-        time.sleep(15) # Give the database time to load inside container
+        time.sleep(15) 
 
-        # Try to inject the listener up to 5 times
         for i in range(1, 6):
             logging.info(f"Injection Attempt {i}/5...")
             
-            # Use 'docker exec' to pipe the command into the running binary
-            # This is the equivalent of you typing it manually
-            inject_cmd = f"docker exec -i {self.container_name} /usr/local/bin/sliver-server <<EOF\nhttp -l 80\nexit\nEOF"
+            # CRITICAL UPDATE: We register the website AND start the listener attached to it.
+            # This makes Sliver respond with 200 OK to the ALB health checker.
+            inject_cmd = f"""docker exec -i {self.container_name} /usr/local/bin/sliver-server <<EOF
+websites add --name decoy --content /root/.sliver/web
+http -l 80 --website decoy
+exit
+EOF"""
             self.run(inject_cmd, check=False)
             
-            # Verification: Check Host Port 80
+            # Verification: Check Host Port 80 and ALB compatibility
             time.sleep(5)
             netstat = self.run("netstat -tulpn")
+            
+            # Verify Port is open
             if ":80" in netstat and "docker-proxy" in netstat:
                 logging.info("SUCCESS: Port 80 is open via Docker Proxy.")
-                logging.info("PROJECT HYDRA IS LIVE (ZERO TOUCH).")
-                return True
+                
+                # Double Check: Does it respond to HTTP now?
+                chk = self.run("curl -I http://localhost", check=False)
+                if "200 OK" in chk or "404 Not Found" in chk:
+                    logging.info("SUCCESS: Server is responding to HTTP. Cloak is active.")
+                    logging.info("PROJECT HYDRA IS LIVE (ZERO TOUCH).")
+                    return True
+                else:
+                    logging.warning(f"Port open but curl failed: {chk}")
             
-            logging.warning("Listener not yet active. Retrying...")
+            logging.warning("Listener not fully active yet. Retrying...")
             time.sleep(5)
 
         logging.error("CRITICAL: Listener injection failed after 5 attempts.")
         return False
 
 if __name__ == "__main__":
-    # Wait for cloud-init network
     time.sleep(5)
     orchestrator = HydraZeroTouchOrchestrator()
     try:
@@ -143,5 +159,5 @@ if __name__ == "__main__":
         orchestrator.phase_5_launch_and_inject()
     except Exception as e:
         logging.critical(f"Orchestration Failed: {e}")
-        # Failsafe: Start Nginx so we can at least debug via SSM/SSH without termination
+        # Failsafe
         subprocess.run("systemctl start nginx", shell=True)
