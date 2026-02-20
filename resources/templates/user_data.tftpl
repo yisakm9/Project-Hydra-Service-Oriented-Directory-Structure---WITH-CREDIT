@@ -1,21 +1,23 @@
 #!/bin/bash
 # -----------------------------------------------------------------------------
-# PROJECT HYDRA: AUTONOMOUS C2 NODE (MK.IV) - FULLY AUTOMATED
+# PROJECT HYDRA: AUTONOMOUS C2 NODE (MK.V) - ZERO TOUCH FINAL
 # -----------------------------------------------------------------------------
 
 # 1. SETUP LOGGING
+# Redirects all output to /var/log/hydra-init.log for easy debugging
 exec > >(tee /var/log/hydra-init.log|logger -t user-data -s 2>/dev/console) 2>&1
 
 # 2. CONFIGURATION VARIABLES
+# We use $${VAR} (double dollar) so Terraform ignores them (passes them to Bash).
 SLIVER_VERSION="v1.5.42"
 SLIVER_URL="https://github.com/BishopFox/sliver/releases/download/$${SLIVER_VERSION}/sliver-server_linux"
 
-# Terraform Injected Variables
+# We use ${VAR} (single dollar) so Terraform INJECTS these values.
 S3_BUCKET_NAME="${s3_bucket_name}"
 AWS_REGION="${aws_region}"
 SQS_TASK_URL="${sqs_task_url}"
 
-echo "[*] Hydra Autonomous Bootstrap Started..."
+echo "[*] Hydra Bootstrap Started..."
 
 # ==============================================================================
 # PHASE 1: THE DECOY (INSTANT HEALTH CHECK)
@@ -23,6 +25,7 @@ echo "[*] Hydra Autonomous Bootstrap Started..."
 echo "[+] Phase 1: Deploying Nginx Decoy..."
 export DEBIAN_FRONTEND=noninteractive
 
+# Robust install loop to handle cloud boot locks
 MAX_RETRIES=5
 COUNT=0
 until apt-get update && apt-get install -y nginx curl wget git net-tools unzip jq; do
@@ -32,7 +35,7 @@ until apt-get update && apt-get install -y nginx curl wget git net-tools unzip j
   if [ $COUNT -ge $MAX_RETRIES ]; then echo "[!] Apt failed!"; break; fi
 done
 
-# Create "Maintenance" Page (OpSec)
+# Create the "Maintenance" Decoy Page (OpSec)
 cat <<EOF > /var/www/html/index.nginx-debian.html
 <!DOCTYPE html>
 <html><head><title>System Status</title></head>
@@ -43,7 +46,7 @@ cat <<EOF > /var/www/html/index.nginx-debian.html
 </body></html>
 EOF
 
-# Start Nginx immediately to satisfy ALB Health Check
+# Start Nginx immediately to satisfy ALB Health Check (Port 80)
 systemctl start nginx
 systemctl enable nginx
 
@@ -77,8 +80,8 @@ echo "[+] Phase 4: Installing Sliver $${SLIVER_VERSION}..."
 curl -L "$${SLIVER_URL}" -o /usr/local/bin/sliver-server
 chmod +x /usr/local/bin/sliver-server
 
-# Create Sliver Service (Systemd)
-# We set it to 'disabled' initially so we control the start time
+# Create Sliver Service (Systemd) - Initially DISABLED
+# We define it here but do not start it yet.
 cat <<EOF > /etc/systemd/system/sliver.service
 [Unit]
 Description=Sliver C2 Server
@@ -88,6 +91,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/root
+# Run in daemon mode so it stays alive in background
 ExecStart=/usr/local/bin/sliver-server daemon
 Restart=always
 RestartSec=5
@@ -110,6 +114,7 @@ mkdir -p /root/.sliver
 if [ -f /tmp/sliver_backup.tar.gz ]; then
     echo "[*] Backup found. Extracting..."
     tar -xzvf /tmp/sliver_backup.tar.gz -C /root/
+    # We unpack to ensure assets are ready
     /usr/local/bin/sliver-server unpack
 else
     echo "[!] No backup found. New installation."
@@ -117,7 +122,7 @@ else
 fi
 
 # ==============================================================================
-# PHASE 6: PERSISTENCE SCRIPTS
+# PHASE 6: AUTOMATION & PERSISTENCE
 # ==============================================================================
 echo "[+] Phase 6: Scheduling Backups..."
 
@@ -125,7 +130,9 @@ echo "[+] Phase 6: Scheduling Backups..."
 cat <<EOF > /usr/local/bin/hydra-backup.sh
 #!/bin/bash
 TIMESTAMP=\$(date +%Y%m%d_%H%M%S)
+# Compression
 tar -czf /tmp/latest_sliver_state.tar.gz -C /root .sliver
+# Upload
 /usr/local/bin/aws s3 cp /tmp/latest_sliver_state.tar.gz s3://${s3_bucket_name}/backups/latest_sliver_state.tar.gz --region ${aws_region}
 /usr/local/bin/aws s3 cp /tmp/latest_sliver_state.tar.gz s3://${s3_bucket_name}/backups/history/sliver_state_\$TIMESTAMP.tar.gz --region ${aws_region}
 EOF
@@ -141,25 +148,30 @@ echo "=================================================="
 echo "   PHASE 7: EXECUTING AUTOMATIC HANDOFF"
 echo "=================================================="
 
-# 1. STOP DECOY
-echo "[*] Stopping Nginx (Releasing Port 80)..."
+# 1. STOP DECOY (Release Port 80)
+echo "[*] Stopping Nginx..."
 systemctl stop nginx
 systemctl disable nginx
 
-# 2. START C2
+# 2. START SLIVER DAEMON
 echo "[*] Starting Sliver Daemon..."
 systemctl enable sliver
 systemctl start sliver
 
 # 3. WAIT FOR RPC INITIALIZATION
-# Sliver needs a few seconds to load the DB and start the internal RPC server
-echo "[*] Waiting 10 seconds for Sliver to initialize..."
-sleep 10
+# The daemon needs a moment to load the DB and start the internal RPC listener.
+echo "[*] Waiting 15 seconds for Sliver to initialize..."
+sleep 15
 
-# 4. FORCE START LISTENER
-# We use the local client to tell the daemon to open the HTTP gate.
-# This ensures that even if the S3 state didn't save the listener, we force it open.
-echo "[*] Sending 'http -l 80' command to daemon..."
-/usr/local/bin/sliver-server client http -l 80
+# 4. FORCE START LISTENER (The Magic Fix)
+# We pipe the command into the binary. This connects to the running daemon
+# and instructs it to start the HTTP listener.
+echo "[*] Injecting listener command..."
+/usr/local/bin/sliver-server <<EOF
+http -l 80
+jobs
+exit
+EOF
 
 echo "[+] HANDOFF COMPLETE. Hydra is fully operational on Port 80."
+echo "[+] User Data Script Finished."
