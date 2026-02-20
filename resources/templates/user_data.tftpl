@@ -1,6 +1,6 @@
 #!/bin/bash
 # -----------------------------------------------------------------------------
-# PROJECT HYDRA: AUTONOMOUS C2 NODE (MK.VII) - PRODUCTION READY
+# PROJECT HYDRA: AUTONOMOUS C2 NODE (MK.VIII) - PORT LIBERATION FIX
 # -----------------------------------------------------------------------------
 
 # 1. SETUP LOGGING
@@ -12,22 +12,29 @@ SLIVER_URL="https://github.com/BishopFox/sliver/releases/download/$${SLIVER_VERS
 S3_BUCKET_NAME="${s3_bucket_name}"
 AWS_REGION="${aws_region}"
 
-echo "[*] Hydra Autonomous Bootstrap Started..."
+echo "[*] Hydra Bootstrap Started..."
 
 # ==============================================================================
 # PHASE 1: THE DECOY (STABILIZE ALB)
 # ==============================================================================
 export DEBIAN_FRONTEND=noninteractive
-apt-get update && apt-get install -y nginx curl wget git net-tools unzip jq
+# Retry loop for robust install
+MAX_RETRIES=5
+COUNT=0
+until apt-get update && apt-get install -y nginx curl wget git net-tools unzip jq; do
+  echo "[-] Apt lock. Retrying..."
+  sleep 5
+  ((COUNT++))
+  if [ $COUNT -ge $MAX_RETRIES ]; then break; fi
+done
 
 # Start Nginx immediately to satisfy ALB Health Check
 systemctl start nginx
 systemctl enable nginx
 
 # ==============================================================================
-# PHASE 2: AWS CLI & SYSTEM OPTIMIZATION
+# PHASE 2: SYSTEM PREP
 # ==============================================================================
-echo "[+] Phase 2: Installing AWS CLI and Swap..."
 curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
 unzip -q awscliv2.zip
 ./aws/install && rm -rf aws awscliv2.zip
@@ -41,14 +48,14 @@ if [ ! -f /swapfile ]; then
 fi
 
 # ==============================================================================
-# PHASE 3: SLIVER INSTALL & PHOENIX RESTORE
+# PHASE 3: SLIVER INSTALL & RESTORE
 # ==============================================================================
-echo "[+] Phase 3: Downloading and Restoring Sliver..."
-# CRITICAL: Actually downloading the binary
+echo "[*] Installing Sliver..."
 curl -L "$${SLIVER_URL}" -o /usr/local/bin/sliver-server
 chmod +x /usr/local/bin/sliver-server
 
 mkdir -p /root/.sliver
+echo "[*] Restoring S3 State..."
 /usr/local/bin/aws s3 cp "s3://${s3_bucket_name}/backups/latest_sliver_state.tar.gz" /tmp/sliver_backup.tar.gz --region "${aws_region}" || true
 
 if [ -f /tmp/sliver_backup.tar.gz ]; then
@@ -57,7 +64,7 @@ fi
 /usr/local/bin/sliver-server unpack
 
 # ==============================================================================
-# PHASE 4: PERSISTENT DAEMON CONFIG (Systemd)
+# PHASE 4: DAEMON CONFIG (BUT DO NOT START YET)
 # ==============================================================================
 cat <<EOF > /etc/systemd/system/sliver.service
 [Unit]
@@ -80,48 +87,7 @@ EOF
 systemctl daemon-reload
 
 # ==============================================================================
-# PHASE 5: THE ATOMIC WATCHER (BACKGROUND HANDOFF)
-# ==============================================================================
-echo "[*] Initializing Background Atomic Handoff..."
-
-# 1. Create the Watcher Script
-cat <<'EOF' > /usr/local/bin/hydra-watcher.sh
-#!/bin/bash
-SOCKET="/root/.sliver/sliver.sock"
-echo "[*] Watcher: Waiting for Sliver Socket..." >> /var/log/hydra-init.log
-
-# Wait up to 60 seconds for the daemon to create the socket
-for i in {1..30}; do
-    if [ -S "$SOCKET" ]; then
-        echo "[+] Watcher: Socket detected. Stopping Nginx and Injecting Listener..." >> /var/log/hydra-init.log
-        
-        # Free up Port 80
-        systemctl stop nginx
-        
-        # Inject the listener command into the running daemon
-        /usr/local/bin/sliver-server <<EOC
-http -l 80
-jobs
-exit
-EOC
-        echo "[+] Watcher: Handoff complete. Sliver is live." >> /var/log/hydra-init.log
-        exit 0
-    fi
-    sleep 2
-done
-echo "[!] Watcher: Timeout. Manual intervention required." >> /var/log/hydra-init.log
-exit 1
-EOF
-
-chmod +x /usr/local/bin/hydra-watcher.sh
-
-# 2. Start the Daemon and the Watcher
-systemctl enable sliver
-systemctl start sliver
-nohup /usr/local/bin/hydra-watcher.sh > /dev/null 2>&1 &
-
-# ==============================================================================
-# PHASE 6: PERSISTENCE (BACKUP)
+# PHASE 5: PERSISTENCE (BACKUP)
 # ==============================================================================
 cat <<EOF > /usr/local/bin/hydra-backup.sh
 #!/bin/bash
@@ -131,4 +97,46 @@ EOF
 chmod +x /usr/local/bin/hydra-backup.sh
 (crontab -l 2>/dev/null; echo "*/30 * * * * /usr/local/bin/hydra-backup.sh") | crontab -
 
-echo "[+] Bootstrap logic complete. Zero-touch automation active."
+# ==============================================================================
+# PHASE 6: THE SEQUENTIAL HANDOFF (NO DEADLOCK)
+# ==============================================================================
+echo "=================================================="
+echo "   PHASE 6: EXECUTING SEQUENTIAL HANDOFF"
+echo "=================================================="
+
+# 1. KILL DECOY FIRST
+# We MUST free Port 80 before starting Sliver, otherwise Sliver crashes
+# if the restored DB tries to bind :80 immediately.
+echo "[*] Killing Nginx (Releasing Port 80)..."
+systemctl stop nginx
+systemctl disable nginx
+
+# 2. START SLIVER
+echo "[*] Starting Sliver Daemon..."
+systemctl enable sliver
+systemctl start sliver
+
+# 3. VERIFY & INJECT
+# We wait for the socket to confirm the daemon didn't crash.
+# Then we run 'http -l 80' just to be double sure it's active.
+echo "[*] Waiting for socket stability (15s)..."
+SOCKET="/root/.sliver/sliver.sock"
+
+for i in {1..15}; do
+    if [ -S "$SOCKET" ]; then
+        echo "[+] Socket found! Injecting listener command..."
+        
+        /usr/local/bin/sliver-server <<EOC
+http -l 80
+jobs
+exit
+EOC
+        echo "[+] Handoff Complete. Sliver is listening on Port 80."
+        exit 0
+    fi
+    sleep 2
+done
+
+echo "[!] Error: Socket did not appear. Daemon may have crashed."
+# Last ditch attempt: force start manually
+/usr/local/bin/sliver-server client http -l 80
