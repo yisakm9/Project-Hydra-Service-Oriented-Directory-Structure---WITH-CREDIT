@@ -169,7 +169,7 @@ jobs:
 
       - name: Terraform Init
         working-directory: ${{ env.TF_ROOT }}
-        run: terraform init
+        run: terraform init -input=false -no-color
 
       # --- REPEAT SAFETY BYPASS FOR APPLY PHASE ---
       - name: Disable Lifecycle Guard (Full Burn Only)
