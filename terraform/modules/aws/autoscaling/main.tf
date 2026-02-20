@@ -64,15 +64,14 @@ resource "aws_autoscaling_group" "c2_asg" {
   health_check_type         = "ELB"
   health_check_grace_period = 300
 
-  # --- Spot Instance Strategy: "The Shotgun" ---
+  # --- Spot Instance Strategy (The "Wide Net") ---
   mixed_instances_policy {
     instances_distribution {
       on_demand_base_capacity                  = 0
-      on_demand_percentage_above_base_capacity = 0 # 100% Spot
-      
-      # "price-capacity-optimized" is the BEST strategy for finding capacity.
-      # It ignores the cheapest option if it's likely to be interrupted.
-      spot_allocation_strategy                 = "price-capacity-optimized" 
+      on_demand_percentage_above_base_capacity = 0
+      # STRATEGY CHANGE: This tells AWS to prioritize availability over lowest price
+      # If the cheapest is out of stock, it instantly picks the next available one.
+      spot_allocation_strategy                 = "capacity-optimized"
     }
 
     launch_template {
@@ -81,26 +80,24 @@ resource "aws_autoscaling_group" "c2_asg" {
         version            = "$Latest"
       }
 
-      # --- OVERRIDES: The expanded probability pool ---
-      
-      # 1. Primary Target (Burstable, 8GB RAM)
+      # --- 1. General Purpose (Balance) ---
       override { instance_type = "t4g.large" }
-
-      # 2. General Purpose (Standard, 8GB RAM)
       override { instance_type = "m6g.large" }
-      override { instance_type = "m7g.large" } # Newer gen
+      override { instance_type = "m7g.large" } # Newer Gen
 
-      # 3. Memory Optimized (16GB RAM - Often very cheap on Spot!)
-      override { instance_type = "r6g.large" }
-      override { instance_type = "r7g.large" }
-
-      # 4. Compute Optimized (4GB RAM - Robust availability)
-      # We have Swap enabled, so 4GB is safe for Sliver.
+      # --- 2. Compute Optimized (Good for C2/Compilation) ---
+      # Often CHEAPER and MORE AVAILABLE than T/M series
       override { instance_type = "c6g.large" }
       override { instance_type = "c7g.large" }
+      override { instance_type = "c6g.xlarge" } # Slightly more $, but high availability
 
-      # 5. Failsafe (Smallest acceptable size)
+      # --- 3. Memory Optimized (Overkill RAM, but keeps you online) ---
+      override { instance_type = "r6g.large" }
+      
+      # --- 4. The "Life Raft" (Smaller instances) ---
+      # If all "Large" instances are gone, accept a Medium just to stay online.
       override { instance_type = "t4g.medium" }
+      override { instance_type = "c6g.medium" }
     }
   }
 
