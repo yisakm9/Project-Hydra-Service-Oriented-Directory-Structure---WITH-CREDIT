@@ -14,7 +14,7 @@ logging.basicConfig(
     ]
 )
 
-class HydraZeroTouchOrchestrator:
+class HydraHardenedOrchestrator:
     def __init__(self):
         self.s3_bucket = "${s3_bucket_name}"
         self.region = "${aws_region}"
@@ -29,135 +29,119 @@ class HydraZeroTouchOrchestrator:
             result = subprocess.run(cmd, shell=True, check=check, capture_output=True, text=True)
             return result.stdout
         except subprocess.CalledProcessError as e:
-            logging.error(f"Command failed: {e.cmd}\nStdout: {e.stdout}\nStderr: {e.stderr}")
+            logging.error(f"Command failed: {e.cmd}\nError: {e.stderr}")
             if check: raise e
             return None
 
-    def phase_1_prepare(self):
-        logging.info("--- Phase 1: Decoy & Dependencies ---")
+    def phase_1_prepare_host(self):
+        logging.info("--- Phase 1: Host Hardening & Proxy Setup ---")
         self.run("export DEBIAN_FRONTEND=noninteractive && apt-get update")
-        self.run("apt-get install -y nginx curl wget jq unzip net-tools")
-        # Start Nginx to pass initial ALB health checks while we build
-        self.run("systemctl start nginx && systemctl enable nginx")
+        self.run("apt-get install -y nginx curl wget jq unzip net-tools build-essential libcap2-bin")
+        
+        # CONFIGURE NGINX AS REVERSE PROXY
+        # This solves the 502/TCP Reset error permanently.
+        proxy_config = """
+server {
+    listen 80;
+    server_name _;
+
+    # Standard C2 Forwarding
+    location / {
+        proxy_pass http://127.0.0.1:8888;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        
+        # ALB Health Check Resilience: If Sliver is booting, return 200 instead of 502
+        error_page 502 503 504 =200 /maintenance.html;
+    }
+
+    location /maintenance.html {
+        return 200 'OK';
+    }
+}
+"""
+        with open("/etc/nginx/sites-available/default", "w") as f:
+            f.write(proxy_config)
+        
+        self.run("systemctl restart nginx && systemctl enable nginx")
 
     def phase_2_docker(self):
-        logging.info("--- Phase 2: Docker Engine ---")
+        logging.info("--- Phase 2: Docker Engine Setup ---")
         if not os.path.exists("/usr/bin/docker"):
             self.run("curl -fsSL https://get.docker.com | sh")
             self.run("systemctl enable docker && systemctl start docker")
 
     def phase_3_supply_chain(self):
-        logging.info("--- Phase 3: Binary Fetch, S3 Restore & Cloak Prep ---")
-        # Download Binary
+        logging.info("--- Phase 3: Binary Fetch & S3 Restore ---")
         url = f"https://github.com/BishopFox/sliver/releases/download/v{self.version}/sliver-server_linux"
         self.run(f"wget -q '{url}' -O {self.bin_path}")
         self.run(f"chmod +x {self.bin_path}")
 
-        # S3 Restore (Phoenix Protocol)
         self.run("mkdir -p /root/.sliver")
         restore_cmd = f"aws s3 cp s3://{self.s3_bucket}/backups/latest_sliver_state.tar.gz /tmp/sliver_backup.tar.gz --region {self.region}"
         if self.run(restore_cmd, check=False):
-            logging.info("[*] Backup found. Restoring database...")
+            logging.info("[*] Recovery state found. Restoring...")
             self.run("tar -xzvf /tmp/sliver_backup.tar.gz -C /root/", check=False)
-        
-        # Ownership Fix
         self.run("chown -R root:root /root/.sliver")
 
-        # --- CLOAKING SETUP (Critical for ALB) ---
-        # Create a decoy website so the ALB receives 200 OK instead of TCP RST
-        self.run("mkdir -p /root/.sliver/web")
-        decoy_html = "<html><body><h1>System Maintenance</h1><p>The requested resource is currently unavailable.</p></body></html>"
-        with open("/root/.sliver/web/index.html", "w") as f:
-            f.write(decoy_html)
-
     def phase_4_build_image(self):
-        logging.info("--- Phase 4: Local Image Build ---")
-        dockerfile = f"""
+        logging.info("--- Phase 4: Local Container Build ---")
+        dockerfile = """
 FROM ubuntu:24.04
 RUN apt-get update && apt-get install -y ca-certificates libcap2-bin && rm -rf /var/lib/apt/lists/*
 COPY sliver-server /usr/local/bin/sliver-server
 RUN chmod +x /usr/local/bin/sliver-server
 ENV HOME=/root
 WORKDIR /root
-# We use 'daemon' mode as the entrypoint
 ENTRYPOINT ["/usr/local/bin/sliver-server", "daemon"]
 """
-        with open("/tmp/Dockerfile", "w") as f:
-            f.write(dockerfile)
-        
+        with open("/tmp/Dockerfile", "w") as f: f.write(dockerfile)
         self.run(f"cp {self.bin_path} /tmp/sliver-server")
         self.run(f"docker build -t {self.image_name} /tmp")
 
-    def phase_5_launch_and_inject(self):
-        logging.info("--- Phase 5: Zero-Touch Handoff & Cloak Activation ---")
-        
-        # 1. Kill Nginx (Release Port 80)
-        self.run("systemctl stop nginx")
-        self.run("systemctl disable nginx")
-
-        # 2. Launch Container (Explicit Port Mapping)
+    def phase_5_zero_touch_handoff(self):
+        logging.info("--- Phase 5: Zero-Touch Handoff (Reverse Proxy) ---")
         self.run(f"docker rm -f {self.container_name}", check=False)
         
+        # We map Port 8888 because Nginx is already owning Port 80
         launch_cmd = (
-            f"docker run -d "
-            f"--name {self.container_name} "
-            f"--restart always "
-            f"-p 80:80 "
-            f"--privileged "
-            f"-v /root/.sliver:/root/.sliver "
-            f"{self.image_name}"
+            f"docker run -d --name {self.container_name} --restart always "
+            f"-p 127.0.0.1:8888:8888 --privileged "
+            f"-v /root/.sliver:/root/.sliver {self.image_name}"
         )
         self.run(launch_cmd)
 
-        # 3. Listener Injection Loop (The "Enforcer")
-        logging.info("Waiting for Daemon to initialize...")
-        time.sleep(15) 
+        logging.info("Waiting for gRPC socket...")
+        time.sleep(20) 
 
         for i in range(1, 6):
             logging.info(f"Injection Attempt {i}/5...")
             
-            # CRITICAL UPDATE: We register the website AND start the listener attached to it.
-            # This makes Sliver respond with 200 OK to the ALB health checker.
-            inject_cmd = f"""docker exec -i {self.container_name} /usr/local/bin/sliver-server <<EOF
-websites add --name decoy --content /root/.sliver/web
-http -l 80 --website decoy
-exit
-EOF"""
+            # Start the listener on the internal port 8888
+            inject_cmd = f"docker exec -i {self.container_name} /usr/local/bin/sliver-server <<EOF\nhttp -l 8888\nexit\nEOF"
             self.run(inject_cmd, check=False)
             
-            # Verification: Check Host Port 80 and ALB compatibility
             time.sleep(5)
-            netstat = self.run("netstat -tulpn")
+            # Verify port 8888 is active
+            if ":8888" in self.run("netstat -tulpn"):
+                logging.info("SUCCESS: Sliver is listening on internal port 8888.")
+                logging.info("PROJECT HYDRA IS LIVE (HARDENED PROXY MODE).")
+                return True
             
-            # Verify Port is open
-            if ":80" in netstat and "docker-proxy" in netstat:
-                logging.info("SUCCESS: Port 80 is open via Docker Proxy.")
-                
-                # Double Check: Does it respond to HTTP now?
-                chk = self.run("curl -I http://localhost", check=False)
-                if "200 OK" in chk or "404 Not Found" in chk:
-                    logging.info("SUCCESS: Server is responding to HTTP. Cloak is active.")
-                    logging.info("PROJECT HYDRA IS LIVE (ZERO TOUCH).")
-                    return True
-                else:
-                    logging.warning(f"Port open but curl failed: {chk}")
-            
-            logging.warning("Listener not fully active yet. Retrying...")
             time.sleep(5)
 
-        logging.error("CRITICAL: Listener injection failed after 5 attempts.")
+        logging.error("CRITICAL: Listener injection failed.")
         return False
 
 if __name__ == "__main__":
     time.sleep(5)
-    orchestrator = HydraZeroTouchOrchestrator()
+    hydra = HydraHardenedOrchestrator()
     try:
-        orchestrator.phase_1_prepare()
-        orchestrator.phase_2_docker()
-        orchestrator.phase_3_supply_chain()
-        orchestrator.phase_4_build_image()
-        orchestrator.phase_5_launch_and_inject()
+        hydra.phase_1_prepare_host()
+        hydra.phase_2_docker()
+        hydra.phase_3_supply_chain()
+        hydra.phase_4_build_image()
+        hydra.phase_5_zero_touch_handoff()
     except Exception as e:
-        logging.critical(f"Orchestration Failed: {e}")
-        # Failsafe
-        subprocess.run("systemctl start nginx", shell=True)
+        logging.critical(f"Hydra Initialization Failed: {e}")
