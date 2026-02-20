@@ -18,10 +18,7 @@ data "aws_ami" "ubuntu" {
 resource "aws_launch_template" "c2_template" {
   name_prefix   = "${var.project_name}-lt-"
   image_id      = data.aws_ami.ubuntu.id
-  
-  # CRITICAL CHANGE: We DO NOT specify instance_type here.
-  # The Auto Scaling Group will inject the type based on the Attributes below.
-  # instance_type = var.instance_type 
+  instance_type = var.instance_type # defaults to t4g.large
 
   vpc_security_group_ids = var.security_group_ids
   
@@ -34,13 +31,14 @@ resource "aws_launch_template" "c2_template" {
   block_device_mappings {
     device_name = "/dev/sda1"
     ebs {
-      volume_size           = 30 # Kept your upgrade to 30GB
+      volume_size           = 20
       volume_type           = "gp3"
       encrypted             = true
       delete_on_termination = true
     }
   }
 
+  # Cost Allocation Tags
   tag_specifications {
     resource_type = "instance"
     tags = {
@@ -67,15 +65,19 @@ resource "aws_autoscaling_group" "c2_asg" {
   health_check_type         = "ELB"
   health_check_grace_period = 300
 
-  # --- Spot Instance Strategy (Attribute-Based Selection) ---
+  # --- RELIABILITY STRATEGY (On-Demand) ---
+  # We are using 100% On-Demand to prevent Spot capacity errors.
+  # Your $130 budget easily covers the ~$49/mo cost of a t4g.large.
   mixed_instances_policy {
     instances_distribution {
+      # 0 Base means we look at the percentage below
       on_demand_base_capacity                  = 0
-      on_demand_percentage_above_base_capacity = 0 # 100% Spot
       
-      # "price-capacity-optimized" is the best modern strategy.
-      # It balances "Likelihood of interruption" (Capacity) with "Cost" (Price).
-      spot_allocation_strategy                 = "price-capacity-optimized"
+      # 100% On-Demand means we ignore Spot entirely to ensure stability
+      on_demand_percentage_above_base_capacity = 100
+      
+      # Strategy is irrelevant for On-Demand, but good to keep clean
+      spot_allocation_strategy                 = "capacity-optimized" 
     }
 
     launch_template {
@@ -84,33 +86,10 @@ resource "aws_autoscaling_group" "c2_asg" {
         version            = "$Latest"
       }
 
-      # --- DYNAMIC OVERRIDES (The Solution) ---
-      # Instead of listing specific types, we define the "Shape" of the server we want.
-      # AWS will pick the cheapest available instance that matches these rules.
+      # We stick to the robust t4g.large (ARM64)
+      # No overrides needed since we are paying for priority access (On-Demand)
       override {
-        instance_requirements {
-          # 1. CPU: Strictly 2 vCPUs (Matches t4g.large, c6g.large, etc.)
-          vcpu_count {
-            min = 2
-            max = 2
-          }
-
-          # 2. RAM: Between 4GB (Medium) and 8GB (Large)
-          # This allows fallback to t4g.medium/c6g.large if t4g.large is sold out.
-          memory_mib {
-            min = 4096 
-            max = 8192 
-          }
-
-          # 3. Architecture: Must be ARM64 (Graviton) to match your AMI
-          cpu_manufacturers = ["amazon-web-services"]
-          
-          # 4. Generation: Current generation only (avoids old, slow hardware)
-          instance_generations = ["current"]
-          
-          # 5. Burstable: Allowed (Includes T-series)
-          burstable_performance = "included"
-        }
+        instance_type = "t4g.large"
       }
     }
   }
