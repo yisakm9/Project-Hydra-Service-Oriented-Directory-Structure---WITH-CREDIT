@@ -4,7 +4,7 @@ import time
 import logging
 import sys
 
-# --- Advanced Logging ---
+# --- Professional Logging ---
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -14,7 +14,7 @@ logging.basicConfig(
     ]
 )
 
-class HydraSupplyChainOrchestrator:
+class HydraZeroTouchOrchestrator:
     def __init__(self):
         self.s3_bucket = "${s3_bucket_name}"
         self.region = "${aws_region}"
@@ -34,84 +34,114 @@ class HydraSupplyChainOrchestrator:
             return None
 
     def phase_1_prepare(self):
-        logging.info("--- Phase 1: Host Prep & Decoy ---")
+        logging.info("--- Phase 1: Decoy & Dependencies ---")
         self.run("export DEBIAN_FRONTEND=noninteractive && apt-get update")
         self.run("apt-get install -y nginx curl wget jq unzip net-tools")
+        # Start Nginx to pass initial ALB health checks
         self.run("systemctl start nginx && systemctl enable nginx")
 
     def phase_2_docker(self):
-        logging.info("--- Phase 2: Docker Engine Setup ---")
+        logging.info("--- Phase 2: Docker Engine ---")
         if not os.path.exists("/usr/bin/docker"):
             self.run("curl -fsSL https://get.docker.com | sh")
             self.run("systemctl enable docker && systemctl start docker")
 
-    def phase_3_binary_fetch(self):
-        logging.info("--- Phase 3: Binary Supply Chain ---")
-        # Download the official binary directly from GitHub
+    def phase_3_supply_chain(self):
+        logging.info("--- Phase 3: Binary Fetch & S3 Restore ---")
+        # Download Binary
         url = f"https://github.com/BishopFox/sliver/releases/download/v{self.version}/sliver-server_linux"
         self.run(f"wget -q '{url}' -O {self.bin_path}")
         self.run(f"chmod +x {self.bin_path}")
 
-        # Phoenix Restore
+        # S3 Restore (Phoenix Protocol)
         self.run("mkdir -p /root/.sliver")
         restore_cmd = f"aws s3 cp s3://{self.s3_bucket}/backups/latest_sliver_state.tar.gz /tmp/sliver_backup.tar.gz --region {self.region}"
         if self.run(restore_cmd, check=False):
-            logging.info("Restoring state from S3...")
+            logging.info("[*] Backup found. Restoring database...")
             self.run("tar -xzvf /tmp/sliver_backup.tar.gz -C /root/", check=False)
+        
+        # Ownership Fix
         self.run("chown -R root:root /root/.sliver")
 
-    def phase_4_build_local_image(self):
-        logging.info("--- Phase 4: Build Local Docker Image ---")
-        # Creating a Dockerfile that uses the binary we just downloaded
-        dockerfile_content = f"""
+    def phase_4_build_image(self):
+        logging.info("--- Phase 4: Local Image Build ---")
+        dockerfile = f"""
 FROM ubuntu:24.04
 RUN apt-get update && apt-get install -y ca-certificates libcap2-bin && rm -rf /var/lib/apt/lists/*
 COPY sliver-server /usr/local/bin/sliver-server
 RUN chmod +x /usr/local/bin/sliver-server
 ENV HOME=/root
 WORKDIR /root
+# We use 'daemon' mode as the entrypoint
 ENTRYPOINT ["/usr/local/bin/sliver-server", "daemon"]
 """
         with open("/tmp/Dockerfile", "w") as f:
-            f.write(dockerfile_content)
+            f.write(dockerfile)
         
-        # Build the image using the binary from the host
         self.run(f"cp {self.bin_path} /tmp/sliver-server")
         self.run(f"docker build -t {self.image_name} /tmp")
 
-    def phase_5_launch(self):
-        logging.info("--- Phase 5: Container Handoff ---")
-        # 1. Liberate Port 80
+    def phase_5_launch_and_inject(self):
+        logging.info("--- Phase 5: Zero-Touch Handoff ---")
+        
+        # 1. Kill Nginx (Release Port 80)
         self.run("systemctl stop nginx")
+        self.run("systemctl disable nginx")
 
-        # 2. Launch Local Container
+        # 2. Launch Container (Using your PROVEN manual config)
+        # -p 80:80 : Explicit bridge mapping (Works with ALB)
+        # --privileged : Allows low-port binding without capability issues
         self.run(f"docker rm -f {self.container_name}", check=False)
+        
         launch_cmd = (
             f"docker run -d "
             f"--name {self.container_name} "
             f"--restart always "
-            f"--network host "
+            f"-p 80:80 "
+            f"--privileged "
             f"-v /root/.sliver:/root/.sliver "
             f"{self.image_name}"
         )
         self.run(launch_cmd)
 
-        # 3. Final Injection
-        logging.info("Waiting for gRPC socket...")
-        time.sleep(15)
-        # Using local binary as a client to talk to the containerized daemon
-        self.run(f"echo 'http -l 80\nexit' | {self.bin_path}")
-        logging.info("PROJECT HYDRA IS LIVE (LOCAL-BUILD CONTAINER).")
+        # 3. Listener Injection Loop (The "Enforcer")
+        logging.info("Waiting for Daemon to initialize...")
+        time.sleep(15) # Give the database time to load inside container
+
+        # Try to inject the listener up to 5 times
+        for i in range(1, 6):
+            logging.info(f"Injection Attempt {i}/5...")
+            
+            # Use 'docker exec' to pipe the command into the running binary
+            # This is the equivalent of you typing it manually
+            inject_cmd = f"docker exec -i {self.container_name} /usr/local/bin/sliver-server <<EOF\nhttp -l 80\nexit\nEOF"
+            self.run(inject_cmd, check=False)
+            
+            # Verification: Check Host Port 80
+            time.sleep(5)
+            netstat = self.run("netstat -tulpn")
+            if ":80" in netstat and "docker-proxy" in netstat:
+                logging.info("SUCCESS: Port 80 is open via Docker Proxy.")
+                logging.info("PROJECT HYDRA IS LIVE (ZERO TOUCH).")
+                return True
+            
+            logging.warning("Listener not yet active. Retrying...")
+            time.sleep(5)
+
+        logging.error("CRITICAL: Listener injection failed after 5 attempts.")
+        return False
 
 if __name__ == "__main__":
+    # Wait for cloud-init network
     time.sleep(5)
-    orchestrator = HydraSupplyChainOrchestrator()
+    orchestrator = HydraZeroTouchOrchestrator()
     try:
         orchestrator.phase_1_prepare()
         orchestrator.phase_2_docker()
-        orchestrator.phase_3_binary_fetch()
-        orchestrator.phase_4_build_local_image()
-        orchestrator.phase_5_launch()
+        orchestrator.phase_3_supply_chain()
+        orchestrator.phase_4_build_image()
+        orchestrator.phase_5_launch_and_inject()
     except Exception as e:
-        logging.critical(f"Deployment Failed: {e}")
+        logging.critical(f"Orchestration Failed: {e}")
+        # Failsafe: Start Nginx so we can at least debug via SSM/SSH without termination
         subprocess.run("systemctl start nginx", shell=True)
