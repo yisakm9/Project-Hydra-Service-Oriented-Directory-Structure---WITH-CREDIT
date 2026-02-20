@@ -4,7 +4,7 @@ import time
 import logging
 import sys
 
-# --- Configuration & Logging ---
+# --- Professional Logging ---
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -19,130 +19,139 @@ class HydraOrchestrator:
         self.s3_bucket = "${s3_bucket_name}"
         self.region = "${aws_region}"
         self.version = "v1.5.42"
-        self.sliver_url = f"https://github.com/BishopFox/sliver/releases/download/{self.version}/sliver-server_linux"
+        self.bin_path = "/usr/local/bin/sliver-server"
         self.socket_path = "/root/.sliver/sliver.sock"
+        self.env = os.environ.copy()
+        self.env["HOME"] = "/root"
+        self.env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-    def run(self, cmd, check=True):
-        """Execute system commands with full environment context."""
+    def run(self, cmd, check=True, timeout=None):
         try:
             logging.info(f"Executing: {cmd}")
-            # Ensure HOME and PATH are set so Go/Sliver can find tools
-            custom_env = os.environ.copy()
-            custom_env["HOME"] = "/root"
-            custom_env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-            
-            result = subprocess.run(cmd, shell=True, check=check, capture_output=True, text=True, env=custom_env)
+            result = subprocess.run(
+                cmd, shell=True, check=check, capture_output=True, 
+                text=True, env=self.env, timeout=timeout
+            )
             return result.stdout
+        except subprocess.TimeoutExpired:
+            logging.warning(f"Command timed out: {cmd}")
+            return None
         except subprocess.CalledProcessError as e:
             logging.error(f"Command failed: {e.cmd}\nStdout: {e.stdout}\nStderr: {e.stderr}")
             if check: raise e
             return None
 
-    def phase_1_prepare(self):
-        logging.info("--- Phase 1: Dependency Hardening ---")
+    def phase_1_sys_prep(self):
+        logging.info("--- Phase 1: System Prep ---")
         self.run("export DEBIAN_FRONTEND=noninteractive && apt-get update")
-        # Added build-essential and libcap2-bin for Sliver 1.5+ stability
         self.run("apt-get install -y nginx curl wget jq unzip net-tools build-essential libcap2-bin")
+        # Ensure Nginx is up for the ALB
         self.run("systemctl start nginx && systemctl enable nginx")
 
-    def phase_2_optimize(self):
-        logging.info("--- Phase 2: Resource Allocation ---")
-        if not os.path.exists("/usr/local/bin/aws"):
-            self.run("curl 'https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip' -o 'awscliv2.zip'")
-            self.run("unzip -q awscliv2.zip && ./aws/install && rm -rf aws awscliv2.zip")
+    def phase_2_sliver_setup(self):
+        logging.info("--- Phase 2: Sliver Binary & State Restore ---")
+        # Download with wget for better reliability on large files
+        url = f"https://github.com/BishopFox/sliver/releases/download/{self.version}/sliver-server_linux"
+        self.run(f"wget -q '{url}' -O {self.bin_path}")
+        self.run(f"chmod +x {self.bin_path}")
         
-        if not os.path.exists("/swapfile"):
-            self.run("fallocate -l 4G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile")
-            self.run("echo '/swapfile none swap sw 0 0' >> /etc/fstab")
-
-    def phase_3_install_sliver(self):
-        logging.info("--- Phase 3: Binary Deployment & Asset Unpack ---")
-        self.run(f"curl -L '{self.sliver_url}' -o /usr/local/bin/sliver-server")
-        self.run("chmod +x /usr/local/bin/sliver-server")
+        # S3 Restore
         self.run("mkdir -p /root/.sliver")
-
-        # Phoenix State Restore
-        restore_cmd = f"/usr/local/bin/aws s3 cp s3://{self.s3_bucket}/backups/latest_sliver_state.tar.gz /tmp/sliver_backup.tar.gz --region {self.region}"
-        if self.run(restore_cmd, check=False) is not None:
-            logging.info("[*] State detected in S3. Restoring...")
+        restore_cmd = f"aws s3 cp s3://{self.s3_bucket}/backups/latest_sliver_state.tar.gz /tmp/sliver_backup.tar.gz --region {self.region}"
+        if self.run(restore_cmd, check=False):
+            logging.info("Restoring previous state...")
             self.run("tar -xzvf /tmp/sliver_backup.tar.gz -C /root/", check=False)
         
+        # Critical Clean: Remove any stale locks or sockets from the S3 restore
+        self.run("rm -f /root/.sliver/*.lock /root/.sliver/*.sock", check=False)
         self.run("chown -R root:root /root/.sliver")
+
+        # Force Init: This creates the CA and DB if they don't exist
+        logging.info("Initializing Sliver Assets...")
+        self.run(f"{self.bin_path} unpack")
+        self.run("sync")
+
+    def phase_3_preflight_daemon(self):
+        logging.info("--- Phase 3: Pre-Flight Daemon Initialization ---")
+        # Start Sliver once manually in the background to force DB/Socket creation
+        # We use a timeout to ensure it doesn't hang the script
+        proc = subprocess.Popen(
+            [self.bin_path, "daemon"], 
+            env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        logging.info("Waiting for Pre-Flight socket...")
         
-        # Verify Binary Integrity
-        ver = self.run("/usr/local/bin/sliver-server version")
-        logging.info(f"[*] Verified Sliver Binary: {ver.strip()}")
+        success = False
+        for i in range(20):
+            if os.path.exists(self.socket_path):
+                logging.info("Pre-flight socket active. Seeding listener...")
+                time.sleep(2)
+                self.run(f"echo 'http -l 80\nexit' | {self.bin_path}", check=False)
+                success = True
+                break
+            time.sleep(3)
+        
+        # Kill the pre-flight process so Systemd can take over
+        proc.terminate()
+        self.run("pkill -9 sliver-server", check=False)
+        self.run(f"rm -f {self.socket_path}", check=False)
+        return success
 
-        # Robust Unpack with retry
-        logging.info("[*] Unpacking assets (Deep-Sync)...")
-        self.run("/usr/local/bin/sliver-server unpack")
-        self.run("sync") # Force filesystem flush
-        time.sleep(5)
-
-    def phase_4_service(self):
-        logging.info("--- Phase 4: Hardened Service Deployment ---")
-        # Standardizing environment for Ubuntu 24.04 Systemd
-        service_content = """[Unit]
+    def phase_4_production_service(self):
+        logging.info("--- Phase 4: Production Service Launch ---")
+        service_content = f"""[Unit]
 Description=Sliver C2 Server
 After=network.target
 
 [Service]
 Type=simple
 User=root
-Group=root
 WorkingDirectory=/root
 Environment=HOME=/root
-Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ExecStart=/usr/local/bin/sliver-server daemon
+Environment=PATH={self.env['PATH']}
+ExecStart={self.bin_path} daemon
 Restart=always
-RestartSec=10
+RestartSec=5
 ExecStartPre=/bin/rm -f /root/.sliver/sliver.sock
-StandardOutput=append:/var/log/sliver-daemon.log
-StandardError=append:/var/log/sliver-daemon.log
 
 [Install]
 WantedBy=multi-user.target
 """
         with open("/etc/systemd/system/sliver.service", "w") as f:
             f.write(service_content)
-        self.run("systemctl daemon-reload && systemctl enable sliver")
-
-    def phase_5_handoff(self):
-        logging.info("--- Phase 5: Atomic Handoff ---")
-        self.run("systemctl stop nginx")
-        self.run("systemctl restart sliver")
-
-        logging.info("Polling for active C2 socket (120s timeout)...")
-        for i in range(60):
-            if os.path.exists(self.socket_path):
-                logging.info(f"Socket active on attempt {i}. Initializing listener...")
-                time.sleep(5)
-                # Using the heredoc pipe for reliable listener injection
-                self.run("echo 'http -l 80\nexit' | /usr/local/bin/sliver-server")
-                logging.info("HYDRA IS LIVE.")
-                return True
-            
-            # Diagnostic: Check if process is even alive
-            if i % 5 == 0 and i > 0:
-                is_running = self.run("systemctl is-active sliver", check=False).strip()
-                logging.info(f"Daemon status check: {is_running}")
-                if is_running != "active":
-                    logging.warning("Daemon crashed. Attempting restart...")
-                    self.run("systemctl restart sliver")
-            
-            time.sleep(2)
         
-        logging.error("Handoff failed. Please inspect /var/log/sliver-daemon.log")
+        self.run("systemctl daemon-reload")
+        # Atomic Switch
+        self.run("systemctl stop nginx")
+        self.run("systemctl enable sliver")
+        self.run("systemctl start sliver")
+
+    def phase_5_final_verify(self):
+        logging.info("--- Phase 5: Final Verification ---")
+        for i in range(15):
+            if os.path.exists(self.socket_path):
+                logging.info("Sliver Daemon is live and socket is stable.")
+                # Final check if listener is up, if not, one last injection
+                netstat = self.run("netstat -tulpn")
+                if ":80" not in netstat:
+                    logging.info("Injecting missing listener...")
+                    self.run(f"echo 'http -l 80\nexit' | {self.bin_path}")
+                
+                logging.info("PROJECT HYDRA IS LIVE.")
+                return True
+            time.sleep(2)
         return False
 
 if __name__ == "__main__":
     time.sleep(5)
     orchestrator = HydraOrchestrator()
     try:
-        orchestrator.phase_1_prepare()
-        orchestrator.phase_2_optimize()
-        orchestrator.phase_3_install_sliver()
-        orchestrator.phase_4_service()
-        orchestrator.phase_5_handoff()
+        orchestrator.phase_1_sys_prep()
+        orchestrator.phase_2_sliver_setup()
+        orchestrator.phase_3_preflight_daemon()
+        orchestrator.phase_4_production_service()
+        orchestrator.phase_5_final_verify()
     except Exception as e:
-        logging.critical(f"Initialization Aborted: {str(e)}")
+        logging.critical(f"Bootstrap failed: {str(e)}")
+        # If all fails, ensure Nginx is back on to keep ALB healthy for manual debug
+        subprocess.run("systemctl start nginx", shell=True)
