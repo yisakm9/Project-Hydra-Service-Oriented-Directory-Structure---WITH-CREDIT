@@ -14,7 +14,7 @@ permissions:
 
 env:
   TF_ROOT: terraform/live/production  # Aligned with Phase 6
-  TF_VERSION: 1.10.0                  # Using stable latest
+  TF_VERSION: 1.13.1                 # Using stable latest
   AWS_REGION: us-east-2               # Aligned with the move to Ohio
   # Using the secret for the account ID to keep the workflow modular
   IAM_ROLE_ARN: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHubActionsRole
