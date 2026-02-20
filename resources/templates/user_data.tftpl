@@ -1,12 +1,11 @@
 #!/bin/bash
-# Install Python3 environment
-apt-get update
-apt-get install -y python3 python3-pip
+export DEBIAN_FRONTEND=noninteractive
+apt-get update && apt-get install -y python3
 
-# Inject the rendered Python script from Terraform
+# Inject the Rendered Python Script
 cat <<'EOF' > /usr/local/bin/hydra_init.py
 ${python_init_content}
 EOF
 
-# Execute with logging
-python3 /usr/local/bin/hydra_init.py > /var/log/hydra-boot.log 2>&1
+# Run Orchestrator
+python3 /usr/local/bin/hydra_init.py
