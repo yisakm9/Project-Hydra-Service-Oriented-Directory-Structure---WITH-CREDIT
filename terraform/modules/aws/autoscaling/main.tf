@@ -18,7 +18,7 @@ data "aws_ami" "ubuntu" {
 resource "aws_launch_template" "c2_template" {
   name_prefix   = "${var.project_name}-lt-"
   image_id      = data.aws_ami.ubuntu.id
-  instance_type = var.instance_type # Default fallback
+  instance_type = var.instance_type
 
   vpc_security_group_ids = var.security_group_ids
   
@@ -31,7 +31,7 @@ resource "aws_launch_template" "c2_template" {
   block_device_mappings {
     device_name = "/dev/sda1"
     ebs {
-      volume_size           = 20
+      volume_size           = 30 # Increased to 30GB for larger log/loot storage
       volume_type           = "gp3"
       encrypted             = true
       delete_on_termination = true
@@ -64,11 +64,14 @@ resource "aws_autoscaling_group" "c2_asg" {
   health_check_type         = "ELB"
   health_check_grace_period = 300
 
-  # --- Spot Instance Strategy (Resilient) ---
+  # --- Spot Instance Strategy: "The Shotgun" ---
   mixed_instances_policy {
     instances_distribution {
       on_demand_base_capacity                  = 0
       on_demand_percentage_above_base_capacity = 0 # 100% Spot
+      
+      # "price-capacity-optimized" is the BEST strategy for finding capacity.
+      # It ignores the cheapest option if it's likely to be interrupted.
       spot_allocation_strategy                 = "price-capacity-optimized" 
     }
 
@@ -78,25 +81,26 @@ resource "aws_autoscaling_group" "c2_asg" {
         version            = "$Latest"
       }
 
-      # --- OVERRIDES: The Solution to "UnfulfillableCapacity" ---
+      # --- OVERRIDES: The expanded probability pool ---
       
-      # 1. Primary Choice: t4g.large (2 vCPU, 8GB RAM) - Burstable
-      override {
-        instance_type = "t4g.large"
-      }
+      # 1. Primary Target (Burstable, 8GB RAM)
+      override { instance_type = "t4g.large" }
 
-      # 2. Backup Choice: m6g.large (2 vCPU, 8GB RAM) - Standard
-      # Often has better Spot availability than t4g.
-      override {
-        instance_type = "m6g.large"
-      }
+      # 2. General Purpose (Standard, 8GB RAM)
+      override { instance_type = "m6g.large" }
+      override { instance_type = "m7g.large" } # Newer gen
 
-      # 3. Last Resort: t4g.medium (2 vCPU, 4GB RAM)
-      # If AWS is totally out of 8GB instances, this keeps the C2 alive.
-      # You can still run Sliver, just avoid heavy compiles.
-      override {
-        instance_type = "t4g.medium"
-      }
+      # 3. Memory Optimized (16GB RAM - Often very cheap on Spot!)
+      override { instance_type = "r6g.large" }
+      override { instance_type = "r7g.large" }
+
+      # 4. Compute Optimized (4GB RAM - Robust availability)
+      # We have Swap enabled, so 4GB is safe for Sliver.
+      override { instance_type = "c6g.large" }
+      override { instance_type = "c7g.large" }
+
+      # 5. Failsafe (Smallest acceptable size)
+      override { instance_type = "t4g.medium" }
     }
   }
 
