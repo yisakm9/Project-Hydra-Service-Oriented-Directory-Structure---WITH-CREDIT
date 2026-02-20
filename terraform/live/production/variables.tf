@@ -1,7 +1,7 @@
 variable "aws_region" {
   description = "AWS Region"
   type        = string
-  default     = "us-east-1" # CHANGED FROM us-east-1 to Ohio
+  default     = "us-east-2" # CHANGED FROM us-east-1 to Ohio
 }
 
 variable "my_ip" {
