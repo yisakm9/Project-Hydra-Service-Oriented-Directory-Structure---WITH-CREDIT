@@ -4,7 +4,7 @@ import time
 import logging
 import sys
 
-# --- Professional Logging ---
+# --- Advanced Logging ---
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -14,14 +14,14 @@ logging.basicConfig(
     ]
 )
 
-class HydraDockerOrchestrator:
+class HydraSupplyChainOrchestrator:
     def __init__(self):
         self.s3_bucket = "${s3_bucket_name}"
         self.region = "${aws_region}"
         self.version = "1.5.42"
         self.bin_path = "/usr/local/bin/sliver-server"
-        self.image = "sliverim/sliver:latest"
-        self.container_name = "sliver-server"
+        self.container_name = "hydra-c2"
+        self.image_name = "local/sliver:latest"
 
     def run(self, cmd, check=True):
         try:
@@ -34,81 +34,84 @@ class HydraDockerOrchestrator:
             return None
 
     def phase_1_prepare(self):
-        logging.info("--- Phase 1: Dependencies & Decoy ---")
+        logging.info("--- Phase 1: Host Prep & Decoy ---")
         self.run("export DEBIAN_FRONTEND=noninteractive && apt-get update")
         self.run("apt-get install -y nginx curl wget jq unzip net-tools")
         self.run("systemctl start nginx && systemctl enable nginx")
 
     def phase_2_docker(self):
-        logging.info("--- Phase 2: Docker Environment ---")
+        logging.info("--- Phase 2: Docker Engine Setup ---")
         if not os.path.exists("/usr/bin/docker"):
             self.run("curl -fsSL https://get.docker.com | sh")
             self.run("systemctl enable docker && systemctl start docker")
-        
-        # Pull the official image with retry
-        logging.info("Pulling official Sliver image...")
-        for i in range(3):
-            if self.run(f"docker pull {self.image}", check=False) is not None:
-                return True
-            time.sleep(10)
-        return False
 
-    def phase_3_persistence(self):
-        logging.info("--- Phase 3: S3 Phoenix Restore ---")
+    def phase_3_binary_fetch(self):
+        logging.info("--- Phase 3: Binary Supply Chain ---")
+        # Download the official binary directly from GitHub
+        url = f"https://github.com/BishopFox/sliver/releases/download/v{self.version}/sliver-server_linux"
+        self.run(f"wget -q '{url}' -O {self.bin_path}")
+        self.run(f"chmod +x {self.bin_path}")
+
+        # Phoenix Restore
         self.run("mkdir -p /root/.sliver")
-        
-        # Restore state
         restore_cmd = f"aws s3 cp s3://{self.s3_bucket}/backups/latest_sliver_state.tar.gz /tmp/sliver_backup.tar.gz --region {self.region}"
         if self.run(restore_cmd, check=False):
+            logging.info("Restoring state from S3...")
             self.run("tar -xzvf /tmp/sliver_backup.tar.gz -C /root/", check=False)
-        
-        # Permissions for Docker Mount
         self.run("chown -R root:root /root/.sliver")
 
-    def phase_4_autorun_config(self):
-        logging.info("--- Phase 4: Listener Automation (Sliver Script) ---")
-        # According to the latest Sliver documentation, we can use a script 
-        # to ensure the listener starts immediately on daemon load.
-        script_content = "http -l 80\njobs\n"
-        with open("/root/.sliver/autorun.slv", "w") as f:
-            f.write(script_content)
+    def phase_4_build_local_image(self):
+        logging.info("--- Phase 4: Build Local Docker Image ---")
+        # Creating a Dockerfile that uses the binary we just downloaded
+        dockerfile_content = f"""
+FROM ubuntu:24.04
+RUN apt-get update && apt-get install -y ca-certificates libcap2-bin && rm -rf /var/lib/apt/lists/*
+COPY sliver-server /usr/local/bin/sliver-server
+RUN chmod +x /usr/local/bin/sliver-server
+ENV HOME=/root
+WORKDIR /root
+ENTRYPOINT ["/usr/local/bin/sliver-server", "daemon"]
+"""
+        with open("/tmp/Dockerfile", "w") as f:
+            f.write(dockerfile_content)
+        
+        # Build the image using the binary from the host
+        self.run(f"cp {self.bin_path} /tmp/sliver-server")
+        self.run(f"docker build -t {self.image_name} /tmp")
 
     def phase_5_launch(self):
-        logging.info("--- Phase 5: Container Launch & Handoff ---")
+        logging.info("--- Phase 5: Container Handoff ---")
         # 1. Liberate Port 80
         self.run("systemctl stop nginx")
 
-        # 2. Start Sliver Container
-        # Mounting host's .sliver for persistence and using host network for C2
+        # 2. Launch Local Container
+        self.run(f"docker rm -f {self.container_name}", check=False)
         launch_cmd = (
             f"docker run -d "
             f"--name {self.container_name} "
             f"--restart always "
             f"--network host "
             f"-v /root/.sliver:/root/.sliver "
-            f"{self.image} daemon"
+            f"{self.image_name}"
         )
         self.run(launch_cmd)
 
-        # 3. Final Verification & Manual Trigger if Autorun fails
-        logging.info("Monitoring for C2 availability...")
-        time.sleep(20)
-        netstat = self.run("netstat -tulpn")
-        if ":80" not in netstat:
-            logging.warning("Autorun script delayed. Forcing listener injection...")
-            self.run(f"docker exec -i {self.container_name} /opt/sliver/sliver-server <<EOF\nhttp -l 80\nexit\nEOF")
-        
-        logging.info("PROJECT HYDRA IS LIVE (CONTAINERIZED).")
+        # 3. Final Injection
+        logging.info("Waiting for gRPC socket...")
+        time.sleep(15)
+        # Using local binary as a client to talk to the containerized daemon
+        self.run(f"echo 'http -l 80\nexit' | {self.bin_path}")
+        logging.info("PROJECT HYDRA IS LIVE (LOCAL-BUILD CONTAINER).")
 
 if __name__ == "__main__":
     time.sleep(5)
-    orchestrator = HydraDockerOrchestrator()
+    orchestrator = HydraSupplyChainOrchestrator()
     try:
         orchestrator.phase_1_prepare()
         orchestrator.phase_2_docker()
-        orchestrator.phase_3_persistence()
-        orchestrator.phase_4_autorun_config()
+        orchestrator.phase_3_binary_fetch()
+        orchestrator.phase_4_build_local_image()
         orchestrator.phase_5_launch()
     except Exception as e:
         logging.critical(f"Deployment Failed: {e}")
-        self.run("systemctl start nginx")
+        subprocess.run("systemctl start nginx", shell=True)
