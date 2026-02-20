@@ -1,0 +1,178 @@
+name: "Project Hydra: Infrastructure Dispatch (OIDC)"
+
+on:
+  push:
+    branches: [ "main" ]
+    paths: [ "terraform/**", "resources/**" ]
+  pull_request:
+    branches: [ "main" ]
+    paths: [ "terraform/**", "resources/**" ]
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Operational Task'
+        required: true
+        default: 'plan'
+        type: choice
+        options:
+        - plan
+        - apply
+        - redeploy_server_only
+        - destroy_ephemeral
+        - full_burn
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write   
+  contents: read    
+  pull-requests: write
+
+env:
+  TF_ROOT: terraform/live/dev
+  TF_VERSION: 1.13.1  
+  AWS_REGION: us-east-1 
+  IAM_ROLE_ARN: arn:aws:iam::213855681329:role/GitHubActionsRole
+
+jobs:
+  lint-and-scan:
+    name: "🛡️ Security & Linting"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}  
+      - name: Terraform Format Check
+        run: terraform fmt -recursive
+        working-directory: .
+      - name: Run tfsec
+        uses: aquasecurity/tfsec-action@v1.0.0
+        with:
+          working_directory: terraform/modules
+          soft_fail: false
+
+  terraform-plan:
+    name: "📝 Terraform Plan"
+    needs: lint-and-scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.IAM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: Hydra-TF-Plan
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_ROOT }}
+        run: terraform init
+      - name: Terraform Validate
+        id: validate
+        working-directory: ${{ env.TF_ROOT }}
+        run: terraform validate -no-color
+      # --- ADVANCED LOGIC: BYPASS PREVENT_DESTROY ---
+      - name: Disable Lifecycle Guard (Full Burn Only)
+        if: github.event.inputs.action == 'full_burn'
+        run: |
+          sed -i 's/prevent_destroy = true/prevent_destroy = false/g' terraform/modules/aws/storage/main.tf
+          sed -i 's/force_destroy = false/force_destroy = true/g' terraform/modules/aws/storage/main.tf
+
+      # --- SURGICAL LOGIC: TAINTING ---
+      - name: Taint Resources
+        if: github.event.inputs.action == 'redeploy_server_only'
+        working-directory: ${{ env.TF_ROOT }}
+        run: |
+          terraform taint module.compute.aws_instance.c2_node || true
+          terraform taint module.cloudflare_workers.null_resource.enable_workers_dev || true
+
+      # --- FUTURE-PROOF FIX: FORCED REFRESH ---
+      # This ensures Terraform "catches up" with any manual changes or deleted instances
+      # before it creates the plan.
+      - name: Terraform Refresh
+        working-directory: ${{ env.TF_ROOT }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          TF_VAR_admin_ip: ${{ secrets.ADMIN_IP_CIDR }}
+          TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: terraform refresh
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: ${{ env.TF_ROOT }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          TF_VAR_admin_ip: ${{ secrets.ADMIN_IP_CIDR }}
+          TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ "${{ github.event.inputs.action }}" == "destroy_ephemeral" ]; then
+            terraform plan -destroy -target=module.compute -target=module.networking -target=module.cloudfront -target=module.cloudflare_workers -out=tfplan
+          elif [ "${{ github.event.inputs.action }}" == "full_burn" ]; then
+            terraform plan -destroy -out=tfplan
+          else
+            terraform plan -out=tfplan
+          fi
+
+      - name: Upload Plan Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.TF_ROOT }}/tfplan
+          retention-days: 1
+          overwrite: true 
+
+  terraform-apply:
+    name: "🚀 Terraform Apply"
+    needs: terraform-plan
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && github.event.inputs.action != 'plan'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.IAM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: Hydra-TF-Apply
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_ROOT }}
+        run: terraform init
+
+      - name: Disable Lifecycle Guard (Full Burn Only)
+        if: github.event.inputs.action == 'full_burn'
+        run: |
+          sed -i 's/prevent_destroy = true/prevent_destroy = false/g' terraform/modules/aws/storage/main.tf
+          sed -i 's/force_destroy = false/force_destroy = true/g' terraform/modules/aws/storage/main.tf
+
+      - name: Download Plan Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.TF_ROOT }}
+
+      - name: Terraform Apply
+        working-directory: ${{ env.TF_ROOT }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          TF_VAR_admin_ip: ${{ secrets.ADMIN_IP_CIDR }}
+          TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: terraform apply -auto-approve tfplan

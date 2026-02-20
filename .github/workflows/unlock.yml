@@ -1,0 +1,51 @@
+name: "Project Hydra: Administrative State Unlock"
+
+on:
+  workflow_dispatch:
+    inputs:
+      lock_id:
+        description: 'The Lock ID provided in the Terraform error message'
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  TF_ROOT: terraform/live/dev
+  TF_VERSION: 1.13.1
+  AWS_REGION: us-east-1
+  IAM_ROLE_ARN: arn:aws:iam::213855681329:role/GitHubActionsRole
+
+jobs:
+  force-unlock:
+    name: "🔓 Force Unlock State"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.IAM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: Hydra-TF-Unlock
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_ROOT }}
+        run: terraform init
+        env:
+          # Cloudflare token may be needed even for init if providers are checked
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: Terraform Force Unlock
+        working-directory: ${{ env.TF_ROOT }}
+        # The -force flag bypasses the interactive "yes" prompt
+        run: terraform force-unlock -force ${{ github.event.inputs.lock_id }}

@@ -1,0 +1,49 @@
+ to fix cloudflare
+https://dash.cloudflare.com/f69ff7ad7f66c5ec9b2ac5a0f618032a/workers-and-pages
+
+
+to fix cloudfront 
+
+from EC2 > Instances > (Instance ID)  
+then copy Public DNS examlpe : ec2-18-205-48-27.compute-1.amazonaws.com
+
+CloudFront > Distributions > E1WINV6VP1YF07 > Edit Origin 
+in Origin domain
+Choose an AWS origin, or enter your origin's domain name update examlpe : ec2-18-205-48-27.compute-1.amazonaws.com
+
+
+
+
+
+
+
+
+
+sudo sliver
+
+http --lhost 0.0.0.0 --lport 80
+
+
+jobs
+
+
+exit 
+
+
+
+sudo mkdir -p /root/.sliver-client/configs
+
+
+sudo /usr/local/bin/sliver-server operator --name admin --lhost 127.0.0.1 --permissions all --save /root/.sliver-client/configs/admin.cfg
+
+
+sudo /usr/local/bin/sliver import /root/.sliver-client/configs/admin.cfg
+
+
+
+
+         (for backup )
+
+
+
+sudo /usr/local/bin/hydra-backup.sh
