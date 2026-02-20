@@ -101,10 +101,24 @@ ENTRYPOINT ["/usr/local/bin/sliver-server", "daemon"]
         self.run(f"docker build -t {self.image_name} /tmp")
 
     def phase_5_zero_touch_handoff(self):
-        logging.info("--- Phase 5: Zero-Touch Handoff (Reverse Proxy) ---")
-        self.run(f"docker rm -f {self.container_name}", check=False)
+        logging.info("--- Phase 5: Persistent Zero-Touch Handoff ---")
         
-        # We map Port 8888 because Nginx is already owning Port 80
+        # 1. CREATE PERSISTENT AUTORUN SCRIPT
+        # We place this in the .sliver directory (which is an S3-backed volume)
+        # This makes the listener logic "part of the database" state.
+        autorun_path = "/root/.sliver/autorun.slv"
+        autorun_content = "http -l 8888\njobs\n"
+        
+        try:
+            with open(autorun_path, "w") as f:
+                f.write(autorun_content)
+            self.run(f"chown root:root {autorun_path}")
+            logging.info(f"Created persistent Sliver script at {autorun_path}")
+        except Exception as e:
+            logging.error(f"Failed to create autorun script: {e}")
+
+        # 2. LAUNCH CONTAINER (Hardened Proxy Config)
+        self.run(f"docker rm -f {self.container_name}", check=False)
         launch_cmd = (
             f"docker run -d --name {self.container_name} --restart always "
             f"-p 127.0.0.1:8888:8888 --privileged "
@@ -112,36 +126,29 @@ ENTRYPOINT ["/usr/local/bin/sliver-server", "daemon"]
         )
         self.run(launch_cmd)
 
-        logging.info("Waiting for gRPC socket...")
+        # 3. ATOMIC INITIALIZATION
+        logging.info("Waiting for gRPC socket to stabilize...")
         time.sleep(20) 
 
-        for i in range(1, 6):
-            logging.info(f"Injection Attempt {i}/5...")
-            
-            # Start the listener on the internal port 8888
-            inject_cmd = f"docker exec -i {self.container_name} /usr/local/bin/sliver-server <<EOF\nhttp -l 8888\nexit\nEOF"
-            self.run(inject_cmd, check=False)
-            
+        # We execute the script using the local client binary. 
+        # This is the most stable way to interact with a running daemon.
+        logging.info("Executing persistent initialization script...")
+        init_cmd = f"docker exec -i {self.container_name} /usr/local/bin/sliver-server < {autorun_path}"
+        
+        # We use a loop just to handle slow database migrations on first-boot
+        for i in range(1, 4):
+            logging.info(f"Initialization Attempt {i}/3...")
+            self.run(init_cmd, check=False)
             time.sleep(5)
-            # Verify port 8888 is active
+            
+            # Final Validation: Check if the port is bound on the host
             if ":8888" in self.run("netstat -tulpn"):
-                logging.info("SUCCESS: Sliver is listening on internal port 8888.")
-                logging.info("PROJECT HYDRA IS LIVE (HARDENED PROXY MODE).")
+                logging.info("SUCCESS: Project Hydra is fully autonomous and persistent.")
+                logging.info("PROJECT HYDRA IS LIVE (MK.XXI).")
                 return True
             
-            time.sleep(5)
+            logging.warning("Port 8888 not yet active, retrying...")
+            time.sleep(10)
 
-        logging.error("CRITICAL: Listener injection failed.")
+        logging.error("CRITICAL: Zero-touch handoff failed to verify listener port.")
         return False
-
-if __name__ == "__main__":
-    time.sleep(5)
-    hydra = HydraHardenedOrchestrator()
-    try:
-        hydra.phase_1_prepare_host()
-        hydra.phase_2_docker()
-        hydra.phase_3_supply_chain()
-        hydra.phase_4_build_image()
-        hydra.phase_5_zero_touch_handoff()
-    except Exception as e:
-        logging.critical(f"Hydra Initialization Failed: {e}")
