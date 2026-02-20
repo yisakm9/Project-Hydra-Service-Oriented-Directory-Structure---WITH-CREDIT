@@ -12,6 +12,6 @@
 #c2_tunnel_url       = "https://crimson-tunnel.trycloudflare.com"
 #hydra_secret_header = "super-secret-password-123"
 
-aws_region           = "us-east-1"
+#aws_region           = "us-east-1"
 my_ip                = "196.190.51.72/32" 
 cloudflare_api_token = "D3DGsYdTPL_MYbQaXRc4TosW8eICsNh_QQcLMAw4"
