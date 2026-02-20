@@ -18,7 +18,10 @@ data "aws_ami" "ubuntu" {
 resource "aws_launch_template" "c2_template" {
   name_prefix   = "${var.project_name}-lt-"
   image_id      = data.aws_ami.ubuntu.id
-  instance_type = var.instance_type
+  
+  # CRITICAL CHANGE: We DO NOT specify instance_type here.
+  # The Auto Scaling Group will inject the type based on the Attributes below.
+  # instance_type = var.instance_type 
 
   vpc_security_group_ids = var.security_group_ids
   
@@ -31,7 +34,7 @@ resource "aws_launch_template" "c2_template" {
   block_device_mappings {
     device_name = "/dev/sda1"
     ebs {
-      volume_size           = 30 # Increased to 30GB for larger log/loot storage
+      volume_size           = 30 # Kept your upgrade to 30GB
       volume_type           = "gp3"
       encrypted             = true
       delete_on_termination = true
@@ -64,14 +67,15 @@ resource "aws_autoscaling_group" "c2_asg" {
   health_check_type         = "ELB"
   health_check_grace_period = 300
 
-  # --- Spot Instance Strategy (The "Wide Net") ---
+  # --- Spot Instance Strategy (Attribute-Based Selection) ---
   mixed_instances_policy {
     instances_distribution {
       on_demand_base_capacity                  = 0
-      on_demand_percentage_above_base_capacity = 0
-      # STRATEGY CHANGE: This tells AWS to prioritize availability over lowest price
-      # If the cheapest is out of stock, it instantly picks the next available one.
-      spot_allocation_strategy                 = "capacity-optimized"
+      on_demand_percentage_above_base_capacity = 0 # 100% Spot
+      
+      # "price-capacity-optimized" is the best modern strategy.
+      # It balances "Likelihood of interruption" (Capacity) with "Cost" (Price).
+      spot_allocation_strategy                 = "price-capacity-optimized"
     }
 
     launch_template {
@@ -80,24 +84,34 @@ resource "aws_autoscaling_group" "c2_asg" {
         version            = "$Latest"
       }
 
-      # --- 1. General Purpose (Balance) ---
-      override { instance_type = "t4g.large" }
-      override { instance_type = "m6g.large" }
-      override { instance_type = "m7g.large" } # Newer Gen
+      # --- DYNAMIC OVERRIDES (The Solution) ---
+      # Instead of listing specific types, we define the "Shape" of the server we want.
+      # AWS will pick the cheapest available instance that matches these rules.
+      override {
+        instance_requirements {
+          # 1. CPU: Strictly 2 vCPUs (Matches t4g.large, c6g.large, etc.)
+          vcpu_count {
+            min = 2
+            max = 2
+          }
 
-      # --- 2. Compute Optimized (Good for C2/Compilation) ---
-      # Often CHEAPER and MORE AVAILABLE than T/M series
-      override { instance_type = "c6g.large" }
-      override { instance_type = "c7g.large" }
-      override { instance_type = "c6g.xlarge" } # Slightly more $, but high availability
+          # 2. RAM: Between 4GB (Medium) and 8GB (Large)
+          # This allows fallback to t4g.medium/c6g.large if t4g.large is sold out.
+          memory_mib {
+            min = 4096 
+            max = 8192 
+          }
 
-      # --- 3. Memory Optimized (Overkill RAM, but keeps you online) ---
-      override { instance_type = "r6g.large" }
-      
-      # --- 4. The "Life Raft" (Smaller instances) ---
-      # If all "Large" instances are gone, accept a Medium just to stay online.
-      override { instance_type = "t4g.medium" }
-      override { instance_type = "c6g.medium" }
+          # 3. Architecture: Must be ARM64 (Graviton) to match your AMI
+          cpu_manufacturers = ["amazon-web-services"]
+          
+          # 4. Generation: Current generation only (avoids old, slow hardware)
+          instance_generations = ["current"]
+          
+          # 5. Burstable: Allowed (Includes T-series)
+          burstable_performance = "included"
+        }
+      }
     }
   }
 
