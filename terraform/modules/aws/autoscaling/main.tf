@@ -63,7 +63,7 @@ resource "aws_autoscaling_group" "c2_asg" {
 
   target_group_arns         = var.target_group_arns
   health_check_type         = "ELB"
-  health_check_grace_period = 300
+  health_check_grace_period = 1200
 
   mixed_instances_policy {
     instances_distribution {

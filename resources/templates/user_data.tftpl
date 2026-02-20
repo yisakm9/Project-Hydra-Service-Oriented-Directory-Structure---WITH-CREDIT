@@ -6,36 +6,80 @@ S3_BUCKET_NAME="${s3_bucket_name}"
 AWS_REGION="${aws_region}"
 SQS_TASK_URL="${sqs_task_url}"
 
-# --- 1. System Prep & 4GB Swap (OpSec Resilience) ---
+# ==============================================================================
+# PHASE 1: INSTANT HEALTH CHECK FIX (The Decoy)
+# ==============================================================================
+# We install Nginx immediately so Port 80 opens within ~30 seconds of boot.
+# This prevents the ALB from marking the instance as "Unhealthy" and killing it.
 export DEBIAN_FRONTEND=noninteractive
-apt-get update && apt-get upgrade -y
-apt-get install -y curl wget git net-tools unzip jq awscli
+apt-get update
+apt-get install -y nginx curl wget git net-tools unzip jq awscli
 
+# OpSec: Create a boring "IT Maintenance" page.
+# If a Blue Teamer hits the IP directly, they see this instead of a C2 login.
+cat <<EOF > /var/www/html/index.nginx-debian.html
+<!DOCTYPE html>
+<html>
+<head>
+<title>System Maintenance</title>
+<style>
+    body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-serif; }
+</style>
+</head>
+<body>
+<h1>Service Unavailable</h1>
+<p>The requested node is currently undergoing scheduled maintenance.</p>
+<p><em>Internal Infrastructure Team</em></p>
+</body>
+</html>
+EOF
+
+# Start Nginx immediately to return HTTP 200 OK to the ALB
+systemctl start nginx
+systemctl enable nginx
+
+# ==============================================================================
+# PHASE 2: SYSTEM HARDENING & RESOURCE OPTIMIZATION
+# ==============================================================================
+# Sliver compilation is RAM intensive. Even with 8GB RAM, we add 4GB Swap 
+# to prevent Out-Of-Memory (OOM) crashes during heavy payload generation.
 fallocate -l 4G /swapfile
 chmod 600 /swapfile
 mkswap /swapfile
 swapon /swapfile
 echo '/swapfile none swap sw 0 0' | tee -a /etc/fstab
 
-# --- 2. Container Engine (Docker) ---
+# ==============================================================================
+# PHASE 3: CONTAINER ENGINE SETUP
+# ==============================================================================
+echo "[+] Installing Docker..."
 curl -fsSL https://get.docker.com | sh
 usermod -aG docker ubuntu
 
-# --- 3. Identity Restore (The Phoenix Protocol) ---
-# This ensures that even if the instance is replaced, your C2 keys persist.
+# ==============================================================================
+# PHASE 4: THE PHOENIX PROTOCOL (State Restoration)
+# ==============================================================================
+# This logic allows the C2 server to "die" (Spot reclamation) and come back 
+# with all cryptographic keys intact.
 mkdir -p /root/.sliver
-echo "[*] Attempting to restore state from S3 Vault: $S3_BUCKET_NAME"
-aws s3 cp s3://$S3_BUCKET_NAME/backups/latest_sliver_state.tar.gz /tmp/sliver_backup.tar.gz --region $AWS_REGION || true
 
-if [ -f /tmp/sliver_backup.tar.gz ]; then
+echo "[*] Checking S3 Vault ($S3_BUCKET_NAME) for existing state..."
+# We use '|| true' to prevent the script from crashing if the bucket is empty (first run)
+if aws s3 ls "s3://$S3_BUCKET_NAME/backups/latest_sliver_state.tar.gz" --region "$AWS_REGION"; then
+    echo "[+] Backup found. Restoring Identity..."
+    aws s3 cp "s3://$S3_BUCKET_NAME/backups/latest_sliver_state.tar.gz" /tmp/sliver_backup.tar.gz --region "$AWS_REGION"
     tar -xzvf /tmp/sliver_backup.tar.gz -C /root/
-    echo "[+] State restored successfully."
+    echo "[+] Identity restored."
 else
-    echo "[!] No existing state found. Initializing fresh infrastructure."
+    echo "[!] No backup found. Initializing fresh C2 node."
 fi
 
-# --- 4. Deployment: Sliver C2 (Dockerized) ---
-# Using Docker for better lifecycle management and host isolation.
+# ==============================================================================
+# PHASE 5: DEPLOY SLIVER C2
+# ==============================================================================
+# Run Sliver in Docker with Host Networking.
+# NOTE: Nginx is currently holding Port 80.
+# You can SSH in and run 'systemctl stop nginx' if you need Sliver on Port 80.
 docker run -d \
   --name sliver-server \
   --restart always \
@@ -43,15 +87,27 @@ docker run -d \
   -v /root/.sliver:/root/.sliver \
   sliverim/sliver:latest
 
-# --- 5. Automated State Synchronization ---
-# Backup the DB every 30 minutes to S3.
+# ==============================================================================
+# PHASE 6: AUTOMATED PERSISTENCE (Backup Job)
+# ==============================================================================
+# Every 30 minutes, snapshot the database and keys to S3.
 cat <<EOF > /usr/local/bin/hydra-backup.sh
 #!/bin/bash
+TIMESTAMP=\$(date +%Y%m%d_%H%M%S)
+
+# Compress the .sliver directory (Database & Keys)
 tar -czf /tmp/latest_sliver_state.tar.gz -C /root .sliver
+
+# Upload as 'latest' for immediate recovery
 aws s3 cp /tmp/latest_sliver_state.tar.gz s3://$S3_BUCKET_NAME/backups/latest_sliver_state.tar.gz --region $AWS_REGION
+
+# Upload as 'history' for versioning (Rollback capability)
+aws s3 cp /tmp/latest_sliver_state.tar.gz s3://$S3_BUCKET_NAME/backups/history/sliver_state_\$TIMESTAMP.tar.gz --region $AWS_REGION
 EOF
 
 chmod +x /usr/local/bin/hydra-backup.sh
+
+# Add to Crontab (Runs every 30 mins)
 (crontab -l 2>/dev/null; echo "*/30 * * * * /usr/local/bin/hydra-backup.sh") | crontab -
 
-echo "[+] Hydra Backend Operational."
+echo "[+] Project Hydra Setup Complete. Decoy Active on Port 80."
