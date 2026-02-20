@@ -10,7 +10,7 @@ resource "tls_private_key" "pk" {
 
 resource "aws_key_pair" "kp" {
   key_name   = "hydra-production-key"
-  public_key = tls_private_key.pk.public_key_openssh
+  public_key = file(var.public_key_path)
 }
 
 resource "local_file" "ssh_key" {

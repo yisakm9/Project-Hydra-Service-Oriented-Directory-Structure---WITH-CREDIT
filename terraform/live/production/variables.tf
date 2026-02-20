@@ -20,3 +20,9 @@ variable "cloudflare_zone_id" {
   type        = string
   default     = ""
 }
+
+variable "public_key_path" {
+  description = "Path to the public SSH key"
+  type        = string
+  default     = "../../../hydra_key.pub"
+}
