@@ -89,7 +89,7 @@ resource "aws_autoscaling_group" "c2_asg" {
 
       # List of instances that usually bypass the "Free Tier Only" filter
       override { instance_type = "t3.medium" } # 4GB RAM
-      override { instance_type = "t3.small" }  # 2GB RAM (Last Resort)
+      
       override { instance_type = "c5.large" }  # Compute-heavy (Often high Spot availability)
     }
   }
