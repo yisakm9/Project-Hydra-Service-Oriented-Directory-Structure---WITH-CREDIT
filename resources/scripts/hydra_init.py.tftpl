@@ -4,7 +4,7 @@ import time
 import logging
 import sys
 
-# --- Initialization ---
+# --- Configuration & Logging ---
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -23,9 +23,9 @@ class HydraOrchestrator:
         self.socket_path = "/root/.sliver/sliver.sock"
 
     def run(self, cmd, check=True):
+        """Execute system commands with root context."""
         try:
             logging.info(f"Executing: {cmd}")
-            # Explicitly set HOME for all commands
             env = os.environ.copy()
             env["HOME"] = "/root"
             result = subprocess.run(cmd, shell=True, check=check, capture_output=True, text=True, env=env)
@@ -36,38 +36,40 @@ class HydraOrchestrator:
             return None
 
     def phase_1_decoy(self):
-        logging.info("--- Phase 1: Nginx Decoy ---")
+        logging.info("--- Phase 1: Nginx Decoy Deployment ---")
         self.run("export DEBIAN_FRONTEND=noninteractive && apt-get update")
         self.run("apt-get install -y nginx curl wget jq unzip net-tools")
         self.run("systemctl start nginx && systemctl enable nginx")
 
     def phase_2_optimization(self):
-        logging.info("--- Phase 2: System Optimization ---")
+        logging.info("--- Phase 2: System Optimization (Swap & AWS) ---")
         if not os.path.exists("/usr/local/bin/aws"):
             self.run("curl 'https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip' -o 'awscliv2.zip'")
             self.run("unzip -q awscliv2.zip && ./aws/install && rm -rf aws awscliv2.zip")
+        
         if not os.path.exists("/swapfile"):
             self.run("fallocate -l 4G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile")
             self.run("echo '/swapfile none swap sw 0 0' >> /etc/fstab")
 
     def phase_3_sliver_install(self):
-        logging.info("--- Phase 3: Sliver Installation ---")
+        logging.info("--- Phase 3: Sliver Installation & Phoenix Restore ---")
         self.run(f"curl -L '{self.sliver_url}' -o /usr/local/bin/sliver-server")
         self.run("chmod +x /usr/local/bin/sliver-server")
-        
         self.run("mkdir -p /root/.sliver")
+
+        # Restore from S3 Vault
         restore_cmd = f"/usr/local/bin/aws s3 cp s3://{self.s3_bucket}/backups/latest_sliver_state.tar.gz /tmp/sliver_backup.tar.gz --region {self.region}"
         if self.run(restore_cmd, check=False) is not None:
-            logging.info("Restoring state from S3...")
+            logging.info("[*] State found in S3. Restoring cryptographic keys...")
             self.run("tar -xzvf /tmp/sliver_backup.tar.gz -C /root/", check=False)
         
         self.run("chown -R root:root /root/.sliver")
-        logging.info("Unpacking assets...")
+        logging.info("[*] Unpacking Sliver assets (this may take a few seconds)...")
         self.run("/usr/local/bin/sliver-server unpack")
 
     def phase_4_daemon(self):
         logging.info("--- Phase 4: Systemd Configuration ---")
-        # CRITICAL FIX: Added Environment=HOME=/root and StandardOutput logging
+        # Added Environment=HOME=/root to ensure binary can find its DB
         service_content = """[Unit]
 Description=Sliver C2 Daemon
 After=network.target
@@ -92,35 +94,39 @@ WantedBy=multi-user.target
         self.run("systemctl daemon-reload && systemctl enable sliver")
 
     def phase_5_atomic_handoff(self):
-        logging.info("--- Phase 5: Atomic Handoff ---")
+        logging.info("--- Phase 5: Atomic Handoff Sequence ---")
         self.run("systemctl stop nginx")
-        self.run("systemctl restart sliver")
+        self.run("systemctl start sliver")
 
-        logging.info("Polling for Socket (Max 120s)...")
+        logging.info("Polling for Sliver socket (Max 120s)...")
         for i in range(60):
             if os.path.exists(self.socket_path):
-                logging.info(f"Socket detected on attempt {i}. Finalizing handoff...")
+                logging.info(f"Socket detected (Attempt {i}). Finalizing handoff...")
                 time.sleep(5)
-                # Inject Listener via standard input pipe
+                # Automate listener injection
                 self.run("echo 'http -l 80\nexit' | /usr/local/bin/sliver-server")
-                logging.info("HYDRA IS LIVE.")
+                logging.info("PROJECT HYDRA IS NOW LIVE.")
                 return True
             
-            # Diagnostic: If not appearing, check the daemon log we just created
-            if i == 30:
-                logging.warning("Socket delayed. Dumping daemon logs for debug...")
-                self.run("tail -n 20 /var/log/sliver-daemon.log >> /var/log/hydra-init.log", check=False)
-                
+            # Periodic health check of the daemon during wait
+            if i % 10 == 0 and i > 0:
+                logging.warning("Socket delayed. Inspecting daemon logs...")
+                self.run("tail -n 10 /var/log/sliver-daemon.log >> /var/log/hydra-init.log", check=False)
+            
             time.sleep(2)
         
-        logging.error("Handoff timed out.")
+        logging.error("CRITICAL: Atomic Handoff timed out. Daemon failed to create socket.")
         return False
 
 if __name__ == "__main__":
+    # Small delay for network settle
     time.sleep(5)
-    orchestrator = HydraOrchestrator()
-    orchestrator.phase_1_decoy()
-    orchestrator.phase_2_optimization()
-    orchestrator.phase_3_sliver_install()
-    orchestrator.phase_4_daemon()
-    orchestrator.phase_5_atomic_handoff()
+    hydra = HydraOrchestrator()
+    try:
+        hydra.phase_1_decoy()
+        hydra.phase_2_optimization()
+        hydra.phase_3_sliver_install()
+        hydra.phase_4_daemon()
+        hydra.phase_5_atomic_handoff()
+    except Exception as e:
+        logging.critical(f"Hydra Initialization Failed: {str(e)}")
