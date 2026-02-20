@@ -1,5 +1,6 @@
 #!/bin/bash
-set -e
+# We remove set -e temporarily to ensure Nginx starts even if later steps have issues
+# set -e 
 
 # --- Variables Injected by Terraform ---
 S3_BUCKET_NAME="${s3_bucket_name}"
@@ -7,42 +8,39 @@ AWS_REGION="${aws_region}"
 SQS_TASK_URL="${sqs_task_url}"
 
 # ==============================================================================
-# PHASE 1: INSTANT HEALTH CHECK FIX (The Decoy)
+# PHASE 1: INSTANT HEALTH CHECK (The Decoy)
 # ==============================================================================
-# We install Nginx immediately so Port 80 opens within ~30 seconds of boot.
-# This prevents the ALB from marking the instance as "Unhealthy" and killing it.
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y nginx curl wget git net-tools unzip jq awscli
+# We install only the guaranteed packages first
+apt-get install -y nginx curl wget git net-tools unzip jq
 
-# OpSec: Create a boring "IT Maintenance" page.
-# If a Blue Teamer hits the IP directly, they see this instead of a C2 login.
+# Create the Decoy Page
 cat <<EOF > /var/www/html/index.nginx-debian.html
 <!DOCTYPE html>
-<html>
-<head>
-<title>System Maintenance</title>
-<style>
-    body { width: 35em; margin: 0 auto; font-family: Tahoma, Verdana, Arial, sans-serif; }
-</style>
-</head>
-<body>
-<h1>Service Unavailable</h1>
-<p>The requested node is currently undergoing scheduled maintenance.</p>
-<p><em>Internal Infrastructure Team</em></p>
-</body>
-</html>
+<html><head><title>Under Maintenance</title></head>
+<body style="font-family:sans-serif; text-align:center; padding-top:50px;">
+<h1>503 Service Unavailable</h1>
+<p>The node is undergoing scheduled maintenance. Please check back later.</p>
+</body></html>
 EOF
 
-# Start Nginx immediately to return HTTP 200 OK to the ALB
+# Start Nginx NOW. This fixes the 502 Bad Gateway immediately.
 systemctl start nginx
 systemctl enable nginx
 
 # ==============================================================================
-# PHASE 2: SYSTEM HARDENING & RESOURCE OPTIMIZATION
+# PHASE 2: AWS CLI V2 INSTALLATION (Ubuntu 24.04 Fix)
 # ==============================================================================
-# Sliver compilation is RAM intensive. Even with 8GB RAM, we add 4GB Swap 
-# to prevent Out-Of-Memory (OOM) crashes during heavy payload generation.
+echo "[+] Installing AWS CLI v2 manually..."
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+unzip awscliv2.zip
+sudo ./aws/install
+rm -rf aws awscliv2.zip
+
+# ==============================================================================
+# PHASE 3: SYSTEM OPTIMIZATION
+# ==============================================================================
 fallocate -l 4G /swapfile
 chmod 600 /swapfile
 mkswap /swapfile
@@ -50,36 +48,23 @@ swapon /swapfile
 echo '/swapfile none swap sw 0 0' | tee -a /etc/fstab
 
 # ==============================================================================
-# PHASE 3: CONTAINER ENGINE SETUP
+# PHASE 4: DOCKER & SLIVER SETUP
 # ==============================================================================
 echo "[+] Installing Docker..."
 curl -fsSL https://get.docker.com | sh
 usermod -aG docker ubuntu
 
-# ==============================================================================
-# PHASE 4: THE PHOENIX PROTOCOL (State Restoration)
-# ==============================================================================
-# This logic allows the C2 server to "die" (Spot reclamation) and come back 
-# with all cryptographic keys intact.
 mkdir -p /root/.sliver
 
-echo "[*] Checking S3 Vault ($S3_BUCKET_NAME) for existing state..."
-# We use '|| true' to prevent the script from crashing if the bucket is empty (first run)
-if aws s3 ls "s3://$S3_BUCKET_NAME/backups/latest_sliver_state.tar.gz" --region "$AWS_REGION"; then
-    echo "[+] Backup found. Restoring Identity..."
-    aws s3 cp "s3://$S3_BUCKET_NAME/backups/latest_sliver_state.tar.gz" /tmp/sliver_backup.tar.gz --region "$AWS_REGION"
+# Phoenix Restore
+echo "[*] Restoring state from S3..."
+/usr/local/bin/aws s3 cp "s3://$S3_BUCKET_NAME/backups/latest_sliver_state.tar.gz" /tmp/sliver_backup.tar.gz --region "$AWS_REGION" || true
+
+if [ -f /tmp/sliver_backup.tar.gz ]; then
     tar -xzvf /tmp/sliver_backup.tar.gz -C /root/
-    echo "[+] Identity restored."
-else
-    echo "[!] No backup found. Initializing fresh C2 node."
 fi
 
-# ==============================================================================
-# PHASE 5: DEPLOY SLIVER C2
-# ==============================================================================
-# Run Sliver in Docker with Host Networking.
-# NOTE: Nginx is currently holding Port 80.
-# You can SSH in and run 'systemctl stop nginx' if you need Sliver on Port 80.
+# Run Sliver
 docker run -d \
   --name sliver-server \
   --restart always \
@@ -88,26 +73,15 @@ docker run -d \
   sliverim/sliver:latest
 
 # ==============================================================================
-# PHASE 6: AUTOMATED PERSISTENCE (Backup Job)
+# PHASE 5: BACKUP CRON
 # ==============================================================================
-# Every 30 minutes, snapshot the database and keys to S3.
 cat <<EOF > /usr/local/bin/hydra-backup.sh
 #!/bin/bash
-TIMESTAMP=\$(date +%Y%m%d_%H%M%S)
-
-# Compress the .sliver directory (Database & Keys)
 tar -czf /tmp/latest_sliver_state.tar.gz -C /root .sliver
-
-# Upload as 'latest' for immediate recovery
-aws s3 cp /tmp/latest_sliver_state.tar.gz s3://$S3_BUCKET_NAME/backups/latest_sliver_state.tar.gz --region $AWS_REGION
-
-# Upload as 'history' for versioning (Rollback capability)
-aws s3 cp /tmp/latest_sliver_state.tar.gz s3://$S3_BUCKET_NAME/backups/history/sliver_state_\$TIMESTAMP.tar.gz --region $AWS_REGION
+/usr/local/bin/aws s3 cp /tmp/latest_sliver_state.tar.gz s3://$S3_BUCKET_NAME/backups/latest_sliver_state.tar.gz --region $AWS_REGION
 EOF
 
 chmod +x /usr/local/bin/hydra-backup.sh
-
-# Add to Crontab (Runs every 30 mins)
 (crontab -l 2>/dev/null; echo "*/30 * * * * /usr/local/bin/hydra-backup.sh") | crontab -
 
-echo "[+] Project Hydra Setup Complete. Decoy Active on Port 80."
+echo "[+] Deployment Finished."
