@@ -25,7 +25,10 @@ class HydraOrchestrator:
     def run(self, cmd, check=True):
         try:
             logging.info(f"Executing: {cmd}")
-            result = subprocess.run(cmd, shell=True, check=check, capture_output=True, text=True)
+            # Explicitly set HOME for all commands
+            env = os.environ.copy()
+            env["HOME"] = "/root"
+            result = subprocess.run(cmd, shell=True, check=check, capture_output=True, text=True, env=env)
             return result.stdout
         except subprocess.CalledProcessError as e:
             logging.error(f"Command failed: {e.cmd}\nStdout: {e.stdout}\nStderr: {e.stderr}")
@@ -52,22 +55,19 @@ class HydraOrchestrator:
         self.run(f"curl -L '{self.sliver_url}' -o /usr/local/bin/sliver-server")
         self.run("chmod +x /usr/local/bin/sliver-server")
         
-        # S3 Restore
         self.run("mkdir -p /root/.sliver")
         restore_cmd = f"/usr/local/bin/aws s3 cp s3://{self.s3_bucket}/backups/latest_sliver_state.tar.gz /tmp/sliver_backup.tar.gz --region {self.region}"
         if self.run(restore_cmd, check=False) is not None:
+            logging.info("Restoring state from S3...")
             self.run("tar -xzvf /tmp/sliver_backup.tar.gz -C /root/", check=False)
         
-        # Permission Fix: Ensure root owns restored files
         self.run("chown -R root:root /root/.sliver")
-        
-        # Robust Unpack
         logging.info("Unpacking assets...")
         self.run("/usr/local/bin/sliver-server unpack")
-        time.sleep(5) # Give filesystem time to settle
 
     def phase_4_daemon(self):
         logging.info("--- Phase 4: Systemd Configuration ---")
+        # CRITICAL FIX: Added Environment=HOME=/root and StandardOutput logging
         service_content = """[Unit]
 Description=Sliver C2 Daemon
 After=network.target
@@ -76,10 +76,13 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/root
+Environment=HOME=/root
 ExecStart=/usr/local/bin/sliver-server daemon
 Restart=always
 RestartSec=5
 ExecStartPre=/bin/rm -f /root/.sliver/sliver.sock
+StandardOutput=append:/var/log/sliver-daemon.log
+StandardError=append:/var/log/sliver-daemon.log
 
 [Install]
 WantedBy=multi-user.target
@@ -90,32 +93,27 @@ WantedBy=multi-user.target
 
     def phase_5_atomic_handoff(self):
         logging.info("--- Phase 5: Atomic Handoff ---")
-        # Ensure Nginx is off before starting Sliver to prevent Port 80 conflicts
         self.run("systemctl stop nginx")
-        self.run("systemctl start sliver")
+        self.run("systemctl restart sliver")
 
         logging.info("Polling for Socket (Max 120s)...")
         for i in range(60):
             if os.path.exists(self.socket_path):
-                logging.info("Socket detected. Verifying daemon stability...")
+                logging.info(f"Socket detected on attempt {i}. Finalizing handoff...")
                 time.sleep(5)
-                # Inject Listener
+                # Inject Listener via standard input pipe
                 self.run("echo 'http -l 80\nexit' | /usr/local/bin/sliver-server")
                 logging.info("HYDRA IS LIVE.")
                 return True
             
-            if i % 5 == 0:
-                # Every 10 seconds, check if the service crashed
-                status = self.run("systemctl is-active sliver", check=False).strip()
-                if status != "active":
-                    logging.warning(f"Sliver service is {status}. Attempting restart...")
-                    self.run("systemctl restart sliver")
-            
+            # Diagnostic: If not appearing, check the daemon log we just created
+            if i == 30:
+                logging.warning("Socket delayed. Dumping daemon logs for debug...")
+                self.run("tail -n 20 /var/log/sliver-daemon.log >> /var/log/hydra-init.log", check=False)
+                
             time.sleep(2)
         
-        # Final Diagnostic Dump on failure
-        logging.error("Handoff timed out. Dumping logs...")
-        self.run("journalctl -u sliver -n 50 >> /var/log/hydra-init.log")
+        logging.error("Handoff timed out.")
         return False
 
 if __name__ == "__main__":
