@@ -1,18 +1,17 @@
 #!/bin/bash
 # -----------------------------------------------------------------------------
-# PROJECT HYDRA: RESILIENT C2 BOOTSTRAP (MK.III) - FINAL
+# PROJECT HYDRA: RESILIENT C2 BOOTSTRAP (MK.III) - CLEAN
 # -----------------------------------------------------------------------------
 
 # 1. SETUP LOGGING
-# Redirects all output to /var/log/hydra-init.log for easy debugging
 exec > >(tee /var/log/hydra-init.log|logger -t user-data -s 2>/dev/console) 2>&1
 
 # 2. CONFIGURATION VARIABLES
-# We use $${VAR} (double dollar) so Terraform ignores them (passes them to Bash).
+# Double dollar signs are used here for Bash variables
 SLIVER_VERSION="v1.5.42"
 SLIVER_URL="https://github.com/BishopFox/sliver/releases/download/$${SLIVER_VERSION}/sliver-server_linux"
 
-# We use ${VAR} (single dollar) so Terraform INJECTS these values.
+# Single dollar signs are used here for Terraform Injection
 S3_BUCKET_NAME="${s3_bucket_name}"
 AWS_REGION="${aws_region}"
 SQS_TASK_URL="${sqs_task_url}"
@@ -25,7 +24,6 @@ echo "[*] Hydra Bootstrap Started..."
 echo "[+] Phase 1: Deploying Nginx Decoy..."
 export DEBIAN_FRONTEND=noninteractive
 
-# Robust install loop to handle cloud boot locks
 MAX_RETRIES=5
 COUNT=0
 until apt-get update && apt-get install -y nginx curl wget git net-tools unzip jq; do
@@ -46,7 +44,7 @@ cat <<EOF > /var/www/html/index.nginx-debian.html
 </body></html>
 EOF
 
-# Start Nginx immediately to satisfy ALB Health Check (Port 80)
+# Start Nginx immediately
 systemctl start nginx
 systemctl enable nginx
 
@@ -81,7 +79,6 @@ curl -L "$${SLIVER_URL}" -o /usr/local/bin/sliver-server
 chmod +x /usr/local/bin/sliver-server
 
 # Create Sliver Service (Systemd) - Initially DISABLED
-# This prevents it from fighting Nginx for Port 80 on boot
 cat <<EOF > /etc/systemd/system/sliver.service
 [Unit]
 Description=Sliver C2 Server
@@ -125,15 +122,13 @@ fi
 echo "[+] Phase 6: Creating Helper Scripts..."
 
 # 1. Backup Script
-# We escape $TIMESTAMP as \$TIMESTAMP so it evaluates when the script runs, not now.
 cat <<EOF > /usr/local/bin/hydra-backup.sh
 #!/bin/bash
 TIMESTAMP=\$(date +%Y%m%d_%H%M%S)
 # Compression
 tar -czf /tmp/latest_sliver_state.tar.gz -C /root .sliver
-# Upload 'Latest' (For Phoenix Restore)
+# Upload
 /usr/local/bin/aws s3 cp /tmp/latest_sliver_state.tar.gz s3://${s3_bucket_name}/backups/latest_sliver_state.tar.gz --region ${aws_region}
-# Upload 'History' (For Disaster Recovery)
 /usr/local/bin/aws s3 cp /tmp/latest_sliver_state.tar.gz s3://${s3_bucket_name}/backups/history/sliver_state_\$TIMESTAMP.tar.gz --region ${aws_region}
 EOF
 chmod +x /usr/local/bin/hydra-backup.sh
@@ -141,8 +136,7 @@ chmod +x /usr/local/bin/hydra-backup.sh
 # 2. Cron Job
 (crontab -l 2>/dev/null; echo "*/30 * * * * /usr/local/bin/hydra-backup.sh") | crontab -
 
-# 3. "GO LIVE" SCRIPT (The Magic Switch)
-# This script is what you run when you SSH in.
+# 3. "GO LIVE" SCRIPT
 cat <<EOF > /usr/local/bin/hydra-go-live
 #!/bin/bash
 echo "=================================================="
