@@ -101,14 +101,15 @@ cat <<EOF > /opt/hydra/stages/docker.py
 from core import Shell, logging
 from config import Config
 import time
+import os
+import sys
 
 def apply():
-    logging.info("--- STAGE 2: Docker Environment ---")
+    logging.info("--- STAGE 3: Docker & Build ---")
     
     # 1. Install Docker Engine
     if not Shell.exists("/usr/bin/docker"):
         logging.info("Docker not found. Installing...")
-        # We use a retry loop for the installer script
         for i in range(3):
             try:
                 Shell.run("curl -fsSL https://get.docker.com | sh")
@@ -118,10 +119,15 @@ def apply():
                 logging.warning("Docker install failed. Retrying...")
                 time.sleep(10)
     
-    # 2. Build Local Image (Supply Chain Hardening)
+    # 2. Verify Binary Exists Before Build
+    if not os.path.exists(Config.BIN_PATH):
+        logging.error(f"CRITICAL: Sliver binary missing at {Config.BIN_PATH}")
+        sys.exit(1)
+
+    # 3. Build Local Image
     logging.info("Building hardened local container image...")
     
-    dockerfile = """
+    dockerfile = f\"\"\"
 FROM ubuntu:24.04
 RUN apt-get update && apt-get install -y ca-certificates libcap2-bin && rm -rf /var/lib/apt/lists/*
 COPY sliver-server /usr/local/bin/sliver-server
@@ -129,15 +135,13 @@ RUN chmod +x /usr/local/bin/sliver-server
 ENV HOME=/root
 WORKDIR /root
 ENTRYPOINT ["/usr/local/bin/sliver-server", "daemon"]
-"""
+\"\"\"
     with open("/tmp/Dockerfile", "w") as f:
         f.write(dockerfile)
         
-    # Copy binary to build context
     Shell.run(f"cp {Config.BIN_PATH} /tmp/sliver-server")
     Shell.run(f"docker build -t {Config.IMAGE_NAME} /tmp")
 EOF
-
 # ==============================================================================
 # MODULE 5: SLIVER ASSETS (stages/sliver.py)
 # ==============================================================================
