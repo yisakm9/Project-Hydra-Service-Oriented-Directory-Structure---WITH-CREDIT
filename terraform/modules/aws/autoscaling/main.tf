@@ -32,7 +32,7 @@ resource "aws_launch_template" "c2_template" {
   block_device_mappings {
     device_name = "/dev/sda1"
     ebs {
-      volume_size           = 50 # Increased to 25GB for better performance
+      volume_size           = 30 # Increased to 25GB for better performance
       volume_type           = "gp3"
       encrypted             = true
       delete_on_termination = true
@@ -57,9 +57,9 @@ resource "aws_autoscaling_group" "c2_asg" {
   name                = "${var.project_name}-asg-${var.environment}"
   vpc_zone_identifier = var.subnet_ids
   
-  min_size         = 2
-  max_size         = 2
-  desired_capacity = 2
+  min_size         = 1
+  max_size         = 1
+  desired_capacity = 1
 
   target_group_arns         = var.target_group_arns
   health_check_type         = "ELB"

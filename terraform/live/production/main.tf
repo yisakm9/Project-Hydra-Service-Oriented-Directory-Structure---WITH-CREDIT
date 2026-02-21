@@ -108,3 +108,21 @@ module "autoscaling" {
   # Base64 encode the final rendered bootstrap
   user_data_base64          = base64encode(data.template_file.user_data.rendered)
 }
+
+
+# ==============================================================================
+# 5. EDGE OBFUSCATION (CLOUDFLARE WORKER)
+# ==============================================================================
+module "cloudflare_workers" {
+  source = "../../modules/cloudflare/workers"
+
+  project_name          = local.project_name
+  environment           = local.environment
+  cloudflare_account_id = var.cloudflare_account_id
+  
+  # Forward traffic to the CloudFront distribution we created in Module 3
+  c2_backend_url        = module.cdn.cloudfront_domain_name
+  
+  # Absolute path to the JS script
+  worker_script_path    = abspath("${path.module}/../../../resources/workers/ghost_proxy.js")
+}

@@ -111,6 +111,7 @@ jobs:
         env:
           TF_VAR_my_ip: ${{ secrets.ADMIN_IP_CIDR }}
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          TF_VAR_cloudflare_account_id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           TF_VAR_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
         run: terraform refresh
 
@@ -120,6 +121,7 @@ jobs:
         env:
           TF_VAR_my_ip: ${{ secrets.ADMIN_IP_CIDR }}
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          TF_VAR_cloudflare_account_id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           TF_VAR_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
         run: |
           if [ "${{ github.event.inputs.action }}" == "destroy_ephemeral" ]; then
@@ -189,5 +191,6 @@ jobs:
         env:
           TF_VAR_my_ip: ${{ secrets.ADMIN_IP_CIDR }}
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          TF_VAR_cloudflare_account_id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           TF_VAR_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
         run: terraform apply -auto-approve tfplan

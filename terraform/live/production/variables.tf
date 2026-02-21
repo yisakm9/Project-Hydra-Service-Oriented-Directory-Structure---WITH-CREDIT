@@ -30,3 +30,8 @@ variable "public_key" {
   description = "The public SSH key string"
   type        = string
 }
+variable "cloudflare_account_id" {
+  description = "Cloudflare Account ID"
+  type        = string
+  sensitive   = true
+}

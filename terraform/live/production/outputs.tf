@@ -22,3 +22,7 @@ output "sqs_response_url" {
   description = "The SQS URL for Local Agent Responses"
   value       = module.messaging.response_queue_url
 }
+output "cloudflare_worker_name" {
+  description = "The name of the deployed Cloudflare Worker"
+  value       = module.cloudflare_workers.worker_name
+}
