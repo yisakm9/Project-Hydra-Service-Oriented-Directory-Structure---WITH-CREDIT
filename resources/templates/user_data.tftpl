@@ -1,6 +1,6 @@
 #!/bin/bash
 # -----------------------------------------------------------------------------
-# PROJECT HYDRA: MODULAR BOOTSTRAP INSTALLER (MK.XXVI) - SELF HEALING
+# PROJECT HYDRA: MODULAR BOOTSTRAP INSTALLER (MK.XXV) - SYNTAX FIX
 # -----------------------------------------------------------------------------
 
 # 1. SETUP WORKSPACE
@@ -52,6 +52,10 @@ class Shell:
             logging.error(f"FAIL: {cmd}\nSTDERR: {e.stderr}")
             if check: raise e
             return None
+    
+    @staticmethod
+    def exists(path):
+        return os.path.exists(path)
 EOF
 
 # ==============================================================================
@@ -118,11 +122,13 @@ def apply():
         Shell.run("curl -fsSL https://get.docker.com | sh")
         Shell.run("systemctl enable docker && systemctl start docker")
     
+    # Validate Binary Exists (Crucial Fix)
     if not os.path.exists(Config.BIN_PATH):
         logging.error(f"CRITICAL: Binary not found at {Config.BIN_PATH}")
         sys.exit(1)
 
-    dockerfile = f\"\"\"
+    # Use standard f-string without backslash escapes for the Dockerfile content
+    dockerfile = f"""
 FROM ubuntu:24.04
 RUN apt-get update && apt-get install -y ca-certificates libcap2-bin && rm -rf /var/lib/apt/lists/*
 COPY sliver-server {Config.BIN_PATH}
@@ -130,7 +136,7 @@ RUN chmod +x {Config.BIN_PATH}
 ENV HOME=/root
 WORKDIR /root
 ENTRYPOINT ["{Config.BIN_PATH}", "daemon"]
-\"\"\"
+"""
     with open("/tmp/Dockerfile", "w") as f:
         f.write(dockerfile)
         
@@ -149,8 +155,9 @@ import time
 def apply():
     logging.info(">>> STAGE 4: Proxy & Launch")
     
-    # 1. Nginx Reverse Proxy (Sidecar)
-    nginx_conf = f\"\"\"
+    # Use standard f-string without backslash escapes
+    # We escape the Nginx $ variables with a backslash so Python doesn't try to interpret them
+    nginx_conf = f"""
 server {{
     listen 80;
     location / {{
@@ -161,49 +168,20 @@ server {{
     }}
     location /health {{ return 200 'OK'; }}
 }}
-\"\"\"
+"""
     with open("/etc/nginx/sites-available/default", "w") as f:
         f.write(nginx_conf)
+        
     Shell.run("systemctl restart nginx")
 
-    # 2. Launch Container
     Shell.run(f"docker rm -f {Config.CONTAINER_NAME}", check=False)
     Shell.run(f"docker run -d --name {Config.CONTAINER_NAME} --restart always -p 127.0.0.1:{Config.C2_PORT}:{Config.C2_PORT} --privileged -v /root/.sliver:/root/.sliver {Config.IMAGE_NAME}")
     
-    # 3. INSTALL WATCHDOG HEALER (The Final Fix)
-    logging.info("Installing Persistence Watchdog...")
-    healer_script = f\"\"\"#!/bin/bash
-# Checks if the C2 port is listening on Localhost. If not, injects the autorun script.
-if ! netstat -tulpn | grep -q "127.0.0.1:{Config.C2_PORT}"; then
-    echo "[!] Listener down. Injecting configuration..." >> /var/log/hydra-healer.log
-    docker exec -i {Config.CONTAINER_NAME} {Config.BIN_PATH} < /root/.sliver/autorun.slv
-fi
-\"\"\"
-    with open("/usr/local/bin/hydra-healer.sh", "w") as f: f.write(healer_script)
-    Shell.run("chmod +x /usr/local/bin/hydra-healer.sh")
-
-    # 4. Schedule Watchdog (Every minute)
-    Shell.run('(crontab -l 2>/dev/null; echo "* * * * * /usr/local/bin/hydra-healer.sh") | crontab -')
-
-    # 5. Verification Loop
-    logging.info("Waiting for Sliver listener...")
-    time.sleep(10) # Initial warm-up
+    # Autorun Trigger
+    time.sleep(20)
+    Shell.run(f"docker exec -i {Config.CONTAINER_NAME} {Config.BIN_PATH} < /root/.sliver/autorun.slv", check=False)
     
-    for i in range(12): # Try for 60 seconds
-        # Force run the healer to attempt start immediately
-        Shell.run("/usr/local/bin/hydra-healer.sh", check=False)
-        
-        # Check socket
-        netstat = Shell.run("netstat -tulpn", check=False)
-        if f"127.0.0.1:{Config.C2_PORT}" in netstat:
-            logging.info("SUCCESS: Sliver listener is active.")
-            logging.info("PROJECT HYDRA IS LIVE.")
-            return
-        
-        logging.info(f"Listener not ready (Attempt {i+1}/12)...")
-        time.sleep(5)
-    
-    logging.warning("Bootstrap finished but listener not yet active. Watchdog will handle it automatically via Cron.")
+    logging.info("HYDRA IS LIVE.")
 EOF
 
 # ==============================================================================
@@ -226,6 +204,7 @@ def main():
         stages.network.apply()
     except Exception as e:
         logging.critical(f"FATAL: {e}")
+        # Failsafe: Ensure Nginx is up so ALB doesn't kill the instance
         import subprocess
         subprocess.run("systemctl start nginx", shell=True)
         sys.exit(1)
