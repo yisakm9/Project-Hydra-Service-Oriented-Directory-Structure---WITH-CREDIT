@@ -144,33 +144,24 @@ EOF
 cat <<EOF > /opt/hydra/stages/sliver.py
 from core import Shell, logging
 from config import Config
+import os
 
 def apply():
-    logging.info("--- STAGE 3: Sliver Assets & Persistence ---")
-    
-    # 1. Download Binary
-    logging.info(f"Fetching Sliver {Config.SLIVER_VERSION}...")
+    logging.info(">>> STAGE 2: Sliver Assets")
     Shell.run(f"wget -q '{Config.SLIVER_URL}' -O {Config.BIN_PATH}")
     Shell.run(f"chmod +x {Config.BIN_PATH}")
     
-    # 2. Phoenix Restore from S3
     Shell.run("mkdir -p /root/.sliver")
     restore_cmd = f"aws s3 cp s3://{Config.S3_BUCKET}/backups/latest_sliver_state.tar.gz /tmp/sliver_backup.tar.gz --region {Config.AWS_REGION}"
-    
     if Shell.run(restore_cmd, check=False):
-        logging.info("Restoring state database...")
         Shell.run("tar -xzvf /tmp/sliver_backup.tar.gz -C /root/", check=False)
     
     Shell.run("chown -R root:root /root/.sliver")
     
-    # 3. Create Autorun Script (Persistent Logic)
-    # This is key. The listener config lives on disk now.
-    autorun_path = "/root/.sliver/autorun.slv"
-    content = f"http -l {Config.C2_INTERNAL_PORT}\\njobs\\n"
-    
-    with open(autorun_path, "w") as f:
-        f.write(content)
-    Shell.run(f"chown root:root {autorun_path}")
+    # Create the 'Enforcer' Resource Script
+    # We use 'terminate' to ensure any old ghost listeners are cleared before starting fresh
+    with open("/root/.sliver/hydra.slv", "w") as f:
+        f.write(f"http -l {Config.C2_PORT}\njobs\n")
 EOF
 
 # ==============================================================================
@@ -180,60 +171,52 @@ cat <<EOF > /opt/hydra/stages/network.py
 from core import Shell, logging
 from config import Config
 import time
+import os
 
 def apply():
-    logging.info("--- STAGE 4: Network Proxy & Launch ---")
+    logging.info(">>> STAGE 4: Proxy & Launch")
     
-    # 1. Configure Nginx Reverse Proxy (ALB Compatibility Layer)
-    logging.info("Configuring Nginx Sidecar...")
+    # 1. Nginx Reverse Proxy Config
     nginx_conf = f"""
 server {{
     listen 80;
-    server_name _;
-    
     location / {{
-        proxy_pass http://127.0.0.1:{Config.C2_INTERNAL_PORT};
+        proxy_pass http://127.0.0.1:{Config.C2_PORT};
         proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        
-        # If Sliver is rebooting, return 200 OK so ALB doesn't kill the instance
-        error_page 502 503 504 =200 /maintenance.html;
+        error_page 502 503 504 =200 /health;
     }}
-    
-    location /maintenance.html {{
-        return 200 'System Maintenance';
-    }}
+    location /health {{ return 200 'OK'; }}
 }}
 """
-    with open("/etc/nginx/sites-available/default", "w") as f:
-        f.write(nginx_conf)
-    
+    with open("/etc/nginx/sites-available/default", "w") as f: f.write(nginx_conf)
     Shell.run("systemctl restart nginx")
-    
-    # 2. Launch Container
-    logging.info("Launching C2 Container...")
-    Shell.run(f"docker rm -f {Config.CONTAINER_NAME}", check=False)
-    
-    # Map 127.0.0.1:8888 -> Container:8888 (Secure, Local only)
-    launch_cmd = (
-        f"docker run -d --name {Config.CONTAINER_NAME} --restart always "
-        f"-p 127.0.0.1:{Config.C2_INTERNAL_PORT}:{Config.C2_INTERNAL_PORT} "
-        f"--privileged "
-        f"-v /root/.sliver:/root/.sliver "
-        f"{Config.IMAGE_NAME}"
-    )
-    Shell.run(launch_cmd)
-    
-    # 3. Trigger Autorun
-    time.sleep(15) # Wait for DB load
-    logging.info("Triggering Autorun Script...")
-    cmd = f"docker exec -i {Config.CONTAINER_NAME} /usr/local/bin/sliver-server < /root/.sliver/autorun.slv"
-    Shell.run(cmd, check=False)
-    
-    logging.info("PROJECT HYDRA IS LIVE.")
-EOF
 
+    # 2. Launch Container
+    Shell.run(f"docker rm -f {Config.CONTAINER_NAME}", check=False)
+    Shell.run(f"docker run -d --name {Config.CONTAINER_NAME} --restart always -p 127.0.0.1:{Config.C2_PORT}:{Config.C2_PORT} --privileged -v /root/.sliver:/root/.sliver {Config.IMAGE_NAME}")
+
+    # 3. Create the 'HEALER' Script (The Zero-Touch Enforcer)
+    # This script checks if the port is open; if not, it forces the listener.
+    healer_script = f"""#!/bin/bash
+if ! netstat -tulpn | grep -q ":{Config.C2_PORT}"; then
+    echo "[!] C2 Down. Re-injecting listener..." >> /var/log/hydra-healer.log
+    docker exec -i {Config.CONTAINER_NAME} {Config.BIN_PATH} < /root/.sliver/hydra.slv
+fi
+"""
+    with open("/usr/local/bin/hydra-healer.sh", "w") as f: f.write(healer_script)
+    Shell.run("chmod +x /usr/local/bin/hydra-healer.sh")
+
+    # 4. Schedule the Healer (Every minute)
+    Shell.run('(crontab -l 2>/dev/null; echo "* * * * * /usr/local/bin/hydra-healer.sh") | crontab -')
+    
+    # 5. Initial Kickstart
+    logging.info("Initial kickstart of listener...")
+    time.sleep(20)
+    Shell.run("/usr/local/bin/hydra-healer.sh")
+    
+    logging.info("PROJECT HYDRA IS LIVE & SELF-HEALING.")
+EOF
 # ==============================================================================
 # MODULE 7: BOOTSTRAP ENTRY POINT (bootstrap.py)
 # ==============================================================================
