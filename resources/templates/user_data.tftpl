@@ -18,7 +18,8 @@ class Config:
     S3_BUCKET = "${s3_bucket_name}"
     AWS_REGION = "${aws_region}"
     MYTHIC_DIR = "/opt/Mythic"
-    C2_INTERNAL_PORT = 8080 # Mythic HTTP profile will listen here
+    # Port 8181 is the dedicated C2 lane (avoids Hasura collision)
+    C2_INTERNAL_PORT = 8181
 EOF
 
 # ==============================================================================
@@ -99,7 +100,6 @@ import time
 def apply():
     logging.info(">>> STAGE 3: Mythic Deployment & Phoenix Restore")
     
-    # 1. Attempt Phoenix Restore from S3
     restore_cmd = f"aws s3 cp s3://{Config.S3_BUCKET}/backups/latest_mythic_state.tar.gz /tmp/mythic_backup.tar.gz --region {Config.AWS_REGION}"
     
     if Shell.run(restore_cmd, check=False):
@@ -111,31 +111,27 @@ def apply():
         logging.info("[*] Starting restored Mythic instance...")
         Shell.run("./mythic-cli start", cwd=Config.MYTHIC_DIR)
         
-    # 2. Fresh Installation
     else:
         logging.info("[!] No backup found. Initiating fresh Mythic installation...")
         if not os.path.exists(Config.MYTHIC_DIR):
             Shell.run(f"git clone https://github.com/its-a-feature/Mythic.git {Config.MYTHIC_DIR}")
         
-        # Compile CLI
         Shell.run("make", cwd=Config.MYTHIC_DIR)
-        
-        # Install Agents and Profiles
         Shell.run("./mythic-cli install github https://github.com/MythicAgents/Apollo.git", cwd=Config.MYTHIC_DIR)
         Shell.run("./mythic-cli install github https://github.com/MythicC2Profiles/http.git", cwd=Config.MYTHIC_DIR)
         
-        # Initial Start (Builds the containers)
-        logging.info("[*] Building Mythic Containers (This takes 2-3 minutes)...")
+        # --- ZERO TOUCH FIX: HARDCODE THE PORT ---
+        logging.info("[*] Patching HTTP Profile to use Port 8181...")
+        http_config = f"{Config.MYTHIC_DIR}/InstalledServices/http/c2_code/config.json"
+        Shell.run(f"sed -i 's/\"port\": 80/\"port\": {Config.C2_INTERNAL_PORT}/g' {http_config}", check=False)
+        
+        logging.info("[*] Building Mythic Containers...")
         Shell.run("./mythic-cli start", cwd=Config.MYTHIC_DIR)
         
-        # ZERO-TOUCH FIX: Wait for Docker to register images, then force start
         logging.info("[*] Waiting for Docker registry settlement...")
         time.sleep(15)
-        logging.info("[*] Enforcing 'Up' state for all services...")
-        # mythic-cli wraps docker-compose. This forces any 'Created' containers to 'Up'
         Shell.run("docker compose -f docker-compose.yml up -d", cwd=Config.MYTHIC_DIR)
     
-    # 3. Setup the Persistent Backup Cron Job
     backup_script = f"""#!/bin/bash
 tar -czf /tmp/mythic_backup.tar.gz -C /opt Mythic
 aws s3 cp /tmp/mythic_backup.tar.gz s3://{Config.S3_BUCKET}/backups/latest_mythic_state.tar.gz --region {Config.AWS_REGION}
