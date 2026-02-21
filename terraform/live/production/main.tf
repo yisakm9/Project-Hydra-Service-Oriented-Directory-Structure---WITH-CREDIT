@@ -111,7 +111,18 @@ module "autoscaling" {
 
 
 # ==============================================================================
-# 5. EDGE OBFUSCATION (CLOUDFLARE WORKER)
+# 5. HYBRID TUNNEL (LOCAL PC BRIDGE)
+# ==============================================================================
+module "cloudflare_tunnel" {
+  source = "../../modules/cloudflare/dns"
+
+  project_name          = local.project_name
+  environment           = local.environment
+  cloudflare_account_id = var.cloudflare_account_id
+}
+
+# ==============================================================================
+# 6. EDGE OBFUSCATION (CLOUDFLARE WORKER)
 # ==============================================================================
 module "cloudflare_workers" {
   source = "../../modules/cloudflare/workers"
@@ -120,9 +131,6 @@ module "cloudflare_workers" {
   environment           = local.environment
   cloudflare_account_id = var.cloudflare_account_id
   
-  # Forward traffic to the CloudFront distribution we created in Module 3
   c2_backend_url        = module.cdn.cloudfront_domain_name
-  
-  # Absolute path to the JS script
   worker_script_path    = abspath("${path.module}/../../../resources/workers/ghost_proxy.js")
 }

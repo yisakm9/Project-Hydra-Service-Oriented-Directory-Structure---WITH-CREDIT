@@ -26,3 +26,8 @@ output "cloudflare_worker_name" {
   description = "The name of the deployed Cloudflare Worker"
   value       = module.cloudflare_workers.worker_name
 }
+output "local_pc_tunnel_token" {
+  description = "Run this in your local terminal: cloudflared tunnel run --token <this_value>"
+  value       = module.cloudflare_tunnel.tunnel_token
+  sensitive   = true # You will have to view this in the state file or remove 'sensitive' temporarily to print it.
+}

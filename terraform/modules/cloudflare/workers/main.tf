@@ -20,8 +20,15 @@ resource "cloudflare_workers_script" "ghost_proxy" {
   module     = true
 
   # Pass the CloudFront URL to the Worker
-  plain_text_binding {
+ plain_text_binding {
     name = "C2_BACKEND"
     text = "https://${var.c2_backend_url}"
+  }
+
+  # ADD THIS BLOCK:
+  plain_text_binding {
+    name = "LOCAL_TUNNEL"
+    # Tunnels use a unique internal address ending in cfargotunnel.com
+    text = "https://${var.local_tunnel_cname}" 
   }
 }
