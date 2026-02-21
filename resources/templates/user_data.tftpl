@@ -88,7 +88,7 @@ def apply():
 EOF
 
 # ==============================================================================
-# MODULE 5: MYTHIC C2
+# MODULE 5: MYTHIC C2 (stages/mythic.py)
 # ==============================================================================
 cat <<EOF > /opt/hydra/stages/mythic.py
 from core import Shell, logging
@@ -101,6 +101,10 @@ def apply():
     if not os.path.exists(Config.MYTHIC_DIR):
         Shell.run(f"git clone https://github.com/its-a-feature/Mythic.git {Config.MYTHIC_DIR}")
     
+    # CRITICAL FIX: Compile the mythic-cli binary using 'make'
+    logging.info("Compiling mythic-cli...")
+    Shell.run("make", cwd=Config.MYTHIC_DIR)
+    
     # Install Agents and Profiles
     logging.info("Installing Apollo (Windows Agent) & HTTP Profile...")
     Shell.run("./mythic-cli install github https://github.com/MythicAgents/Apollo.git", cwd=Config.MYTHIC_DIR)
@@ -110,7 +114,7 @@ def apply():
     logging.info("Building and Starting Mythic (This takes a few minutes)...")
     Shell.run("./mythic-cli start", cwd=Config.MYTHIC_DIR)
     
-    # Setup Backup Cron
+    # Setup Backup Cron (Backs up the entire Mythic directory to S3)
     backup_script = f"""#!/bin/bash
 tar -czf /tmp/mythic_backup.tar.gz -C /opt Mythic
 aws s3 cp /tmp/mythic_backup.tar.gz s3://{Config.S3_BUCKET}/backups/latest_mythic_state.tar.gz --region {Config.AWS_REGION}
