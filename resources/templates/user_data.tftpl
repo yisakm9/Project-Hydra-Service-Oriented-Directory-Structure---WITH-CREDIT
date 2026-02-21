@@ -1,11 +1,275 @@
 #!/bin/bash
-export DEBIAN_FRONTEND=noninteractive
-apt-get update && apt-get install -y python3
+# -----------------------------------------------------------------------------
+# PROJECT HYDRA: MODULAR BOOTSTRAP INSTALLER (MK.XXII)
+# -----------------------------------------------------------------------------
 
-# Inject the Rendered Python Script
-cat <<'EOF' > /usr/local/bin/hydra_init.py
-${python_init_content}
+# 1. PRE-FLIGHT CHECKS & LOGGING setup
+mkdir -p /opt/hydra/stages
+exec > >(tee /var/log/hydra-installer.log|logger -t user-data -s 2>/dev/console) 2>&1
+
+echo "[*] Installing Python3..."
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y python3
+
+# ==============================================================================
+# MODULE 1: CONFIGURATION (config.py)
+# ==============================================================================
+cat <<EOF > /opt/hydra/config.py
+class Config:
+    S3_BUCKET = "${s3_bucket_name}"
+    AWS_REGION = "${aws_region}"
+    SLIVER_VERSION = "1.5.42"
+    SLIVER_URL = f"https://github.com/BishopFox/sliver/releases/download/v{SLIVER_VERSION}/sliver-server_linux"
+    BIN_PATH = "/usr/local/bin/sliver-server"
+    CONTAINER_NAME = "hydra-c2"
+    IMAGE_NAME = "local/sliver:latest"
+    # Port 8888 is internal (container), Port 80 is external (Nginx)
+    C2_INTERNAL_PORT = 8888
 EOF
 
-# Run Orchestrator
-python3 /usr/local/bin/hydra_init.py
+# ==============================================================================
+# MODULE 2: CORE UTILITIES (core.py)
+# ==============================================================================
+cat <<EOF > /opt/hydra/core.py
+import subprocess
+import logging
+import sys
+import os
+
+# Configure Logging once
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(module)s: %(message)s',
+    handlers=[
+        logging.FileHandler("/var/log/hydra-execution.log"),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+
+class Shell:
+    @staticmethod
+    def run(cmd, check=True):
+        try:
+            logging.info(f"EXEC: {cmd}")
+            result = subprocess.run(cmd, shell=True, check=check, capture_output=True, text=True)
+            return result.stdout.strip()
+        except subprocess.CalledProcessError as e:
+            logging.error(f"FAIL: {cmd}\nSTDERR: {e.stderr}")
+            if check: raise e
+            return None
+    
+    @staticmethod
+    def exists(path):
+        return os.path.exists(path)
+EOF
+
+# ==============================================================================
+# MODULE 3: SYSTEM PREP (stages/system.py)
+# ==============================================================================
+cat <<EOF > /opt/hydra/stages/system.py
+from core import Shell, logging
+import os
+
+def apply():
+    logging.info("--- STAGE 1: System Hardening & Dependencies ---")
+    
+    # 1. Install Dependencies
+    Shell.run("export DEBIAN_FRONTEND=noninteractive && apt-get update")
+    Shell.run("apt-get install -y nginx curl wget jq unzip net-tools build-essential libcap2-bin")
+    
+    # 2. Start Nginx (Decoy Mode)
+    Shell.run("systemctl start nginx && systemctl enable nginx")
+    
+    # 3. Install AWS CLI v2
+    if not Shell.exists("/usr/local/bin/aws"):
+        logging.info("Installing AWS CLI...")
+        Shell.run("curl 'https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip' -o 'awscliv2.zip'")
+        Shell.run("unzip -q awscliv2.zip && ./aws/install && rm -rf aws awscliv2.zip")
+    
+    # 4. Swap Allocation (Critical for small instances)
+    if not Shell.exists("/swapfile"):
+        logging.info("Allocating Swap...")
+        Shell.run("fallocate -l 4G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile")
+        Shell.run("echo '/swapfile none swap sw 0 0' >> /etc/fstab")
+EOF
+
+# ==============================================================================
+# MODULE 4: DOCKER OPS (stages/docker.py)
+# ==============================================================================
+cat <<EOF > /opt/hydra/stages/docker.py
+from core import Shell, logging
+from config import Config
+import time
+
+def apply():
+    logging.info("--- STAGE 2: Docker Environment ---")
+    
+    # 1. Install Docker Engine
+    if not Shell.exists("/usr/bin/docker"):
+        logging.info("Docker not found. Installing...")
+        # We use a retry loop for the installer script
+        for i in range(3):
+            try:
+                Shell.run("curl -fsSL https://get.docker.com | sh")
+                Shell.run("systemctl enable docker && systemctl start docker")
+                break
+            except:
+                logging.warning("Docker install failed. Retrying...")
+                time.sleep(10)
+    
+    # 2. Build Local Image (Supply Chain Hardening)
+    logging.info("Building hardened local container image...")
+    
+    dockerfile = """
+FROM ubuntu:24.04
+RUN apt-get update && apt-get install -y ca-certificates libcap2-bin && rm -rf /var/lib/apt/lists/*
+COPY sliver-server /usr/local/bin/sliver-server
+RUN chmod +x /usr/local/bin/sliver-server
+ENV HOME=/root
+WORKDIR /root
+ENTRYPOINT ["/usr/local/bin/sliver-server", "daemon"]
+"""
+    with open("/tmp/Dockerfile", "w") as f:
+        f.write(dockerfile)
+        
+    # Copy binary to build context
+    Shell.run(f"cp {Config.BIN_PATH} /tmp/sliver-server")
+    Shell.run(f"docker build -t {Config.IMAGE_NAME} /tmp")
+EOF
+
+# ==============================================================================
+# MODULE 5: SLIVER ASSETS (stages/sliver.py)
+# ==============================================================================
+cat <<EOF > /opt/hydra/stages/sliver.py
+from core import Shell, logging
+from config import Config
+
+def apply():
+    logging.info("--- STAGE 3: Sliver Assets & Persistence ---")
+    
+    # 1. Download Binary
+    logging.info(f"Fetching Sliver {Config.SLIVER_VERSION}...")
+    Shell.run(f"wget -q '{Config.SLIVER_URL}' -O {Config.BIN_PATH}")
+    Shell.run(f"chmod +x {Config.BIN_PATH}")
+    
+    # 2. Phoenix Restore from S3
+    Shell.run("mkdir -p /root/.sliver")
+    restore_cmd = f"aws s3 cp s3://{Config.S3_BUCKET}/backups/latest_sliver_state.tar.gz /tmp/sliver_backup.tar.gz --region {Config.AWS_REGION}"
+    
+    if Shell.run(restore_cmd, check=False):
+        logging.info("Restoring state database...")
+        Shell.run("tar -xzvf /tmp/sliver_backup.tar.gz -C /root/", check=False)
+    
+    Shell.run("chown -R root:root /root/.sliver")
+    
+    # 3. Create Autorun Script (Persistent Logic)
+    # This is key. The listener config lives on disk now.
+    autorun_path = "/root/.sliver/autorun.slv"
+    content = f"http -l {Config.C2_INTERNAL_PORT}\\njobs\\n"
+    
+    with open(autorun_path, "w") as f:
+        f.write(content)
+    Shell.run(f"chown root:root {autorun_path}")
+EOF
+
+# ==============================================================================
+# MODULE 6: NETWORK & LAUNCH (stages/network.py)
+# ==============================================================================
+cat <<EOF > /opt/hydra/stages/network.py
+from core import Shell, logging
+from config import Config
+import time
+
+def apply():
+    logging.info("--- STAGE 4: Network Proxy & Launch ---")
+    
+    # 1. Configure Nginx Reverse Proxy (ALB Compatibility Layer)
+    logging.info("Configuring Nginx Sidecar...")
+    nginx_conf = f"""
+server {{
+    listen 80;
+    server_name _;
+    
+    location / {{
+        proxy_pass http://127.0.0.1:{Config.C2_INTERNAL_PORT};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        
+        # If Sliver is rebooting, return 200 OK so ALB doesn't kill the instance
+        error_page 502 503 504 =200 /maintenance.html;
+    }}
+    
+    location /maintenance.html {{
+        return 200 'System Maintenance';
+    }}
+}}
+"""
+    with open("/etc/nginx/sites-available/default", "w") as f:
+        f.write(nginx_conf)
+    
+    Shell.run("systemctl restart nginx")
+    
+    # 2. Launch Container
+    logging.info("Launching C2 Container...")
+    Shell.run(f"docker rm -f {Config.CONTAINER_NAME}", check=False)
+    
+    # Map 127.0.0.1:8888 -> Container:8888 (Secure, Local only)
+    launch_cmd = (
+        f"docker run -d --name {Config.CONTAINER_NAME} --restart always "
+        f"-p 127.0.0.1:{Config.C2_INTERNAL_PORT}:{Config.C2_INTERNAL_PORT} "
+        f"--privileged "
+        f"-v /root/.sliver:/root/.sliver "
+        f"{Config.IMAGE_NAME}"
+    )
+    Shell.run(launch_cmd)
+    
+    # 3. Trigger Autorun
+    time.sleep(15) # Wait for DB load
+    logging.info("Triggering Autorun Script...")
+    cmd = f"docker exec -i {Config.CONTAINER_NAME} /usr/local/bin/sliver-server < /root/.sliver/autorun.slv"
+    Shell.run(cmd, check=False)
+    
+    logging.info("PROJECT HYDRA IS LIVE.")
+EOF
+
+# ==============================================================================
+# MODULE 7: BOOTSTRAP ENTRY POINT (bootstrap.py)
+# ==============================================================================
+cat <<EOF > /opt/hydra/bootstrap.py
+import sys
+from core import logging
+# Import Stages
+import stages.system
+import stages.docker
+import stages.sliver
+import stages.network
+
+def main():
+    logging.info(">>> STARTING MODULAR BOOTSTRAP <<<")
+    try:
+        stages.system.apply()
+        stages.sliver.apply() # Download binary first so Docker build can use it
+        stages.docker.apply() # Install Docker & Build Image
+        stages.network.apply()# Launch & Proxy
+    except Exception as e:
+        logging.critical(f"BOOTSTRAP CRASHED: {e}")
+        # Failsafe
+        import subprocess
+        subprocess.run("systemctl start nginx", shell=True)
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
+EOF
+
+# ==============================================================================
+# EXECUTE
+# ==============================================================================
+# Create __init__.py to make it a package
+touch /opt/hydra/stages/__init__.py
+
+# Run the Modular Orchestrator
+echo "[*] Launching Python Bootstrap..."
+python3 /opt/hydra/bootstrap.py

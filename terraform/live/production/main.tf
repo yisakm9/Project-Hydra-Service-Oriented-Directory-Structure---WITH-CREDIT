@@ -5,12 +5,6 @@ locals {
   project_name = "hydra"
   environment  = "production"
 
-  # Render the Python Orchestrator first
-  # This pulls the python logic and injects S3/Region data into it
-  rendered_python = templatefile("${path.module}/../../../resources/scripts/hydra_init.py.tftpl", {
-    s3_bucket_name = module.storage.bucket_name
-    aws_region     = var.aws_region
-  })
 }
 
 # ==============================================================================
@@ -94,8 +88,8 @@ data "template_file" "user_data" {
   template = file("${path.module}/../../../resources/templates/user_data.tftpl")
 
   vars = {
-    # Inject the already-rendered Python script into the Bash wrapper
-    python_init_content = local.rendered_python
+    s3_bucket_name = module.storage.bucket_name
+    aws_region     = var.aws_region
   }
 }
 
