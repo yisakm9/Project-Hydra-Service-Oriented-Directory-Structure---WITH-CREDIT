@@ -138,7 +138,7 @@ ENTRYPOINT ["{Config.BIN_PATH}", "daemon"]
 EOF
 
 # ==============================================================================
-# MODULE 6: NETWORK & PEXPECT STAGE (stages/network.py)
+# MODULE 6: NETWORK STAGE (stages/network.py)
 # ==============================================================================
 cat <<EOF > /opt/hydra/stages/network.py
 from core import Shell, logging
@@ -149,6 +149,7 @@ import pexpect
 def apply():
     logging.info(">>> STAGE 4: Proxy & Human Simulation Handoff")
     
+    # 1. Nginx Reverse Proxy Config
     nginx_conf = f"""
 server {{
     listen 80;
@@ -165,51 +166,50 @@ server {{
         f.write(nginx_conf)
     Shell.run("systemctl restart nginx")
 
+    # 2. Launch Container
     Shell.run(f"docker rm -f {Config.CONTAINER_NAME}", check=False)
     Shell.run(f"docker run -d --name {Config.CONTAINER_NAME} --restart always -p 127.0.0.1:{Config.C2_PORT}:{Config.C2_PORT} --privileged -v /root/.sliver:/root/.sliver {Config.IMAGE_NAME}")
 
-    logging.info("Waiting 20 seconds for Sliver Daemon to initialize...")
+    logging.info("Waiting 20 seconds for Sliver Daemon to initialize its database...")
     time.sleep(20)
 
-    # --- THE HUMAN SIMULATOR (PEXPECT) ---
-    logging.info("Initializing PTY injection (Bypassing Go Anti-Automation)...")
+    # 3. --- THE HUMAN SIMULATOR (PEXPECT) ---
+    logging.info("Initializing PTY injection (Bypassing ANSI & Anti-Automation)...")
     try:
-        # We spawn the interactive shell exactly as a human would
+        # Spawn the interactive shell
         cmd = f"docker exec -it {Config.CONTAINER_NAME} {Config.BIN_PATH}"
-        
-        # pexpect allocates a true PTY (Terminal) so Sliver complies
-        child = pexpect.spawn(cmd, encoding='utf-8', timeout=60)
-        
-        # Save output for debugging
+        child = pexpect.spawn(cmd, encoding='utf-8', timeout=45)
         child.logfile = open("/var/log/hydra-pexpect.log", "w")
         
-        logging.info("Waiting for 'sliver >' prompt...")
-        child.expect(r"sliver >")
+        # THE FIX: Match the plain text right before the colored prompt
+        logging.info("Waiting for Sliver welcome banner...")
+        child.expect(r"update' command")
         
-        logging.info(f"Prompt found! Typing 'http -l {Config.C2_PORT}'...")
+        # Wait 2 seconds for the prompt to finish rendering
+        time.sleep(2)
+        
+        # Type the command and press Enter
+        logging.info(f"Injecting: http -l {Config.C2_PORT}")
         child.sendline(f"http -l {Config.C2_PORT}")
         
-        logging.info("Waiting for job confirmation...")
-        # Check if it succeeds or is already running from the S3 DB restore
-        index = child.expect([r"Successfully started job", r"already listening", r"sliver >"])
+        # Give the daemon time to bind the port
+        time.sleep(3)
         
-        if index == 0:
-            logging.info("SUCCESS: New listener started.")
-        elif index == 1:
-            logging.info("SUCCESS: Listener was already active from database.")
-        
-        # Clean exit like a human
+        # Type exit and cleanly close the session
         child.sendline("exit")
+        time.sleep(1)
         child.close()
         
-        logging.info("PROJECT HYDRA IS LIVE (ZERO TOUCH).")
-        
-    except pexpect.TIMEOUT:
-        logging.error("Pexpect timeout! The daemon took too long or the prompt changed.")
-        logging.error(f"Pexpect buffer: {child.before}")
+        # 4. Final Host Verification
+        time.sleep(2)
+        if f"127.0.0.1:{Config.C2_PORT}" in Shell.run("netstat -tulpn", check=False):
+            logging.info("SUCCESS: Port is bound.")
+            logging.info("PROJECT HYDRA IS LIVE (ZERO TOUCH).")
+        else:
+            logging.error("Pexpect completed but port is still closed. Manual injection required.")
+            
     except Exception as e:
         logging.error(f"Pexpect injection failed: {e}")
-
 EOF
 
 # ==============================================================================
