@@ -1,3 +1,13 @@
+terraform {
+  required_providers {
+    cloudflare = {
+      source  = "cloudflare/cloudflare"
+      version = "~> 4.0"
+    }
+  }
+}
+
+
 # Read the JavaScript file
 data "local_file" "worker_script" {
   filename = var.worker_script_path
