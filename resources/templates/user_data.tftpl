@@ -94,6 +94,7 @@ cat <<EOF > /opt/hydra/stages/mythic.py
 from core import Shell, logging
 from config import Config
 import os
+import time
 
 def apply():
     logging.info(">>> STAGE 3: Mythic Deployment & Phoenix Restore")
@@ -104,39 +105,45 @@ def apply():
     if Shell.run(restore_cmd, check=False):
         logging.info("[*] State found in S3! Restoring full Mythic environment...")
         Shell.run("rm -rf /opt/Mythic", check=False)
-        # Extract the backup to /opt (which reconstructs /opt/Mythic)
         Shell.run("tar -xzvf /tmp/mythic_backup.tar.gz -C /opt/", check=False)
         Shell.run("make", cwd=Config.MYTHIC_DIR)
         
-        logging.info("[*] Starting restored Mythic instance. Listeners will auto-resume...")
+        logging.info("[*] Starting restored Mythic instance...")
         Shell.run("./mythic-cli start", cwd=Config.MYTHIC_DIR)
         
-    # 2. Fresh Installation (If no backup is found)
+    # 2. Fresh Installation
     else:
         logging.info("[!] No backup found. Initiating fresh Mythic installation...")
         if not os.path.exists(Config.MYTHIC_DIR):
             Shell.run(f"git clone https://github.com/its-a-feature/Mythic.git {Config.MYTHIC_DIR}")
         
+        # Compile CLI
         Shell.run("make", cwd=Config.MYTHIC_DIR)
+        
+        # Install Agents and Profiles
         Shell.run("./mythic-cli install github https://github.com/MythicAgents/Apollo.git", cwd=Config.MYTHIC_DIR)
         Shell.run("./mythic-cli install github https://github.com/MythicC2Profiles/http.git", cwd=Config.MYTHIC_DIR)
         
-        logging.info("[*] Building and Starting Mythic (This takes a few minutes)...")
+        # Initial Start (Builds the containers)
+        logging.info("[*] Building Mythic Containers (This takes 2-3 minutes)...")
         Shell.run("./mythic-cli start", cwd=Config.MYTHIC_DIR)
+        
+        # ZERO-TOUCH FIX: Wait for Docker to register images, then force start
+        logging.info("[*] Waiting for Docker registry settlement...")
+        time.sleep(15)
+        logging.info("[*] Enforcing 'Up' state for all services...")
+        # mythic-cli wraps docker-compose. This forces any 'Created' containers to 'Up'
+        Shell.run("docker compose -f docker-compose.yml up -d", cwd=Config.MYTHIC_DIR)
     
     # 3. Setup the Persistent Backup Cron Job
-    # This backs up the entire Mythic directory (including the Postgres DB volumes)
     backup_script = f"""#!/bin/bash
 tar -czf /tmp/mythic_backup.tar.gz -C /opt Mythic
 aws s3 cp /tmp/mythic_backup.tar.gz s3://{Config.S3_BUCKET}/backups/latest_mythic_state.tar.gz --region {Config.AWS_REGION}
 """
     with open("/usr/local/bin/hydra-backup.sh", "w") as f: f.write(backup_script)
     Shell.run("chmod +x /usr/local/bin/hydra-backup.sh")
-    
-    # Run backup every hour
     Shell.run('(crontab -l 2>/dev/null; echo "0 * * * * /usr/local/bin/hydra-backup.sh") | crontab -')
 EOF
-
 # ==============================================================================
 # MODULE 6: NETWORK PROXY
 # ==============================================================================
