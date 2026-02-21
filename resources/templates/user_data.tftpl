@@ -200,14 +200,12 @@ except Exception as e:
     with open("/opt/hydra/injector.py", "w") as f: f.write(injector_py)
 
     # 4. Create the True-State Healer
-    # netstat lies because of docker-proxy. We MUST use curl.
     logging.info("Installing True-State Watchdog...")
+    
+    # CRITICAL FIX: '%%{{http_code}}' escapes Terraform (%%), escapes Python ({{}}), leaving '%{http_code}' for Bash
     healer_script = f"""#!/bin/bash
 LOG="/var/log/hydra-healer.log"
-
-# Hit the internal port. If Sliver is listening, it returns 405 or 404.
-# If it's dead, docker-proxy drops it and returns 000 (Connection reset).
-HTTP_CODE=\$(curl -s -o /dev/null -w "%{{http_code}}" http://127.0.0.1:{Config.C2_PORT} || echo "000")
+HTTP_CODE=\$(curl -s -o /dev/null -w "%%{{http_code}}" http://127.0.0.1:{Config.C2_PORT} || echo "000")
 
 if [ "\$HTTP_CODE" == "000" ] || [ "\$HTTP_CODE" == "502" ]; then
     echo "[\$(date)] Listener down (HTTP \$HTTP_CODE). Running Injector..." >> \$LOG
@@ -231,9 +229,9 @@ fi
     
     # 7. Final True-State Verification
     time.sleep(5)
-    check = Shell.run(f"curl -s -o /dev/null -w '%{{http_code}}' http://127.0.0.1:{Config.C2_PORT} || echo '000'", check=False)
+    check = Shell.run(f"curl -s -o /dev/null -w '%%{{http_code}}' http://127.0.0.1:{Config.C2_PORT} || echo '000'", check=False)
     if check != "000":
-        logging.info(f"SUCCESS: C2 is returning HTTP {check}. System is LIVE.")
+        logging.info(f"SUCCESS: C2 is returning HTTP {{check}}. System is LIVE.")
     else:
         logging.warning("Injection delayed. Cron will retry in 60s.")
 EOF
