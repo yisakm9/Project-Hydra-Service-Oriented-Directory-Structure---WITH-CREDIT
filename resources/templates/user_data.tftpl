@@ -1,9 +1,8 @@
 #!/bin/bash
 # -----------------------------------------------------------------------------
-# PROJECT HYDRA: MODULAR BOOTSTRAP INSTALLER (MK.XXV) - SYNTAX FIX
+# PROJECT HYDRA: MODULAR BOOTSTRAP INSTALLER (MK.XXVIII) - PEXPECT SIMULATION
 # -----------------------------------------------------------------------------
 
-# 1. SETUP WORKSPACE
 mkdir -p /opt/hydra/stages
 exec > >(tee /var/log/hydra-installer.log|logger -t user-data -s 2>/dev/console) 2>&1
 
@@ -67,7 +66,8 @@ import os
 
 def apply():
     logging.info(">>> STAGE 1: System Prep")
-    Shell.run("apt-get update && apt-get install -y nginx curl wget jq unzip net-tools build-essential libcap2-bin")
+    # Added python3-pexpect to install list
+    Shell.run("apt-get update && apt-get install -y nginx curl wget jq unzip net-tools build-essential libcap2-bin python3-pexpect")
     Shell.run("systemctl start nginx && systemctl enable nginx")
     
     if not os.path.exists("/usr/local/bin/aws"):
@@ -95,15 +95,10 @@ def apply():
     Shell.run("mkdir -p /root/.sliver")
     restore_cmd = f"aws s3 cp s3://{Config.S3_BUCKET}/backups/latest_sliver_state.tar.gz /tmp/sliver_backup.tar.gz --region {Config.AWS_REGION}"
     
-    # We use check=False because it's okay if S3 restore fails (first run)
     if Shell.run(restore_cmd, check=False):
         Shell.run("tar -xzvf /tmp/sliver_backup.tar.gz -C /root/", check=False)
     
     Shell.run("chown -R root:root /root/.sliver")
-    
-    # Create Autorun Script
-    with open("/root/.sliver/autorun.slv", "w") as f:
-        f.write(f"http -l {Config.C2_PORT}\njobs\n")
 EOF
 
 # ==============================================================================
@@ -126,10 +121,9 @@ def apply():
         logging.error(f"CRITICAL: Binary not found at {Config.BIN_PATH}")
         sys.exit(1)
 
-    # ADDED 'tmux' TO THE INSTALL LIST
     dockerfile = f"""
 FROM ubuntu:24.04
-RUN apt-get update && apt-get install -y ca-certificates libcap2-bin tmux && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ca-certificates libcap2-bin && rm -rf /var/lib/apt/lists/*
 COPY sliver-server {Config.BIN_PATH}
 RUN chmod +x {Config.BIN_PATH}
 ENV HOME=/root
@@ -144,15 +138,16 @@ ENTRYPOINT ["{Config.BIN_PATH}", "daemon"]
 EOF
 
 # ==============================================================================
-# MODULE 6: NETWORK STAGE (stages/network.py)
+# MODULE 6: NETWORK & PEXPECT STAGE (stages/network.py)
 # ==============================================================================
 cat <<EOF > /opt/hydra/stages/network.py
 from core import Shell, logging
 from config import Config
 import time
+import pexpect
 
 def apply():
-    logging.info(">>> STAGE 4: Proxy & Launch")
+    logging.info(">>> STAGE 4: Proxy & Human Simulation Handoff")
     
     nginx_conf = f"""
 server {{
@@ -172,55 +167,51 @@ server {{
 
     Shell.run(f"docker rm -f {Config.CONTAINER_NAME}", check=False)
     Shell.run(f"docker run -d --name {Config.CONTAINER_NAME} --restart always -p 127.0.0.1:{Config.C2_PORT}:{Config.C2_PORT} --privileged -v /root/.sliver:/root/.sliver {Config.IMAGE_NAME}")
-    
-    # 3. INSTALL WATCHDOG HEALER (The Tmux Simulator)
-    logging.info("Installing Tmux Persistence Watchdog...")
-    
-    healer_script = f"""#!/bin/bash
-TARGET="127.0.0.1:{Config.C2_PORT}"
-LOG="/var/log/hydra-healer.log"
 
-if ! netstat -tulpn | grep -q "\$TARGET"; then
-    echo "[\$(date)] Listener down. Initiating Tmux keystroke simulation..." >> \$LOG
-    
-    # 1. Start a hidden terminal session running the Sliver Console
-    docker exec {Config.CONTAINER_NAME} tmux new-session -d -s injector "{Config.BIN_PATH}"
-    
-    # 2. Wait for the console to connect to the daemon (Red Sliver Logo)
-    sleep 10
-    
-    # 3. Simulate typing the command and pressing Enter (C-m)
-    docker exec {Config.CONTAINER_NAME} tmux send-keys -t injector "http -l {Config.C2_PORT}" C-m
-    
-    # 4. Wait for it to process, then type exit and press Enter
-    sleep 5
-    docker exec {Config.CONTAINER_NAME} tmux send-keys -t injector "exit" C-m
-    
-    # 5. Check if it worked
-    sleep 2
-    if netstat -tulpn | grep -q "\$TARGET"; then
-        echo "[\$(date)] SUCCESS: Listener is active." >> \$LOG
-    else
-        echo "[\$(date)] FAILED: Injection missed." >> \$LOG
-    fi
-fi
-"""
-    with open("/usr/local/bin/hydra-healer.sh", "w") as f: f.write(healer_script)
-    Shell.run("chmod +x /usr/local/bin/hydra-healer.sh")
-
-    Shell.run('(crontab -l 2>/dev/null; echo "* * * * * /usr/local/bin/hydra-healer.sh") | crontab -')
-
-    logging.info("Waiting for Sliver Daemon to initialize (20s)...")
+    logging.info("Waiting 20 seconds for Sliver Daemon to initialize...")
     time.sleep(20)
-    
-    logging.info("Triggering initial Tmux healer run...")
-    Shell.run("/usr/local/bin/hydra-healer.sh", check=False)
-    
-    if f"127.0.0.1:{Config.C2_PORT}" in Shell.run("netstat -tulpn", check=False):
-        logging.info("PROJECT HYDRA IS LIVE & LISTENING.")
-    else:
-        logging.warning("Listener start delayed. Check /var/log/hydra-healer.log")
+
+    # --- THE HUMAN SIMULATOR (PEXPECT) ---
+    logging.info("Initializing PTY injection (Bypassing Go Anti-Automation)...")
+    try:
+        # We spawn the interactive shell exactly as a human would
+        cmd = f"docker exec -it {Config.CONTAINER_NAME} {Config.BIN_PATH}"
+        
+        # pexpect allocates a true PTY (Terminal) so Sliver complies
+        child = pexpect.spawn(cmd, encoding='utf-8', timeout=60)
+        
+        # Save output for debugging
+        child.logfile = open("/var/log/hydra-pexpect.log", "w")
+        
+        logging.info("Waiting for 'sliver >' prompt...")
+        child.expect(r"sliver >")
+        
+        logging.info(f"Prompt found! Typing 'http -l {Config.C2_PORT}'...")
+        child.sendline(f"http -l {Config.C2_PORT}")
+        
+        logging.info("Waiting for job confirmation...")
+        # Check if it succeeds or is already running from the S3 DB restore
+        index = child.expect([r"Successfully started job", r"already listening", r"sliver >"])
+        
+        if index == 0:
+            logging.info("SUCCESS: New listener started.")
+        elif index == 1:
+            logging.info("SUCCESS: Listener was already active from database.")
+        
+        # Clean exit like a human
+        child.sendline("exit")
+        child.close()
+        
+        logging.info("PROJECT HYDRA IS LIVE (ZERO TOUCH).")
+        
+    except pexpect.TIMEOUT:
+        logging.error("Pexpect timeout! The daemon took too long or the prompt changed.")
+        logging.error(f"Pexpect buffer: {child.before}")
+    except Exception as e:
+        logging.error(f"Pexpect injection failed: {e}")
+
 EOF
+
 # ==============================================================================
 # MASTER BOOTSTRAP (bootstrap.py)
 # ==============================================================================
@@ -241,7 +232,6 @@ def main():
         stages.network.apply()
     except Exception as e:
         logging.critical(f"FATAL: {e}")
-        # Failsafe: Ensure Nginx is up so ALB doesn't kill the instance
         import subprocess
         subprocess.run("systemctl start nginx", shell=True)
         sys.exit(1)
