@@ -156,8 +156,9 @@ def apply():
     logging.info(">>> STAGE 4: Proxy & Launch")
     
     # 1. Nginx Reverse Proxy Config
-    # We use double curly braces {{ }} for Nginx blocks so Python ignores them.
-    # We use single curly braces { } for Python variables like Config.C2_PORT.
+    # NOTE: We use double curly braces {{ }} for literal Nginx braces.
+    # We use single curly braces { } for Python f-string variables.
+    # We escape \$host so Bash preserves it, but Python writes it as-is.
     nginx_conf = f"""
 server {{
     listen 80;
@@ -177,33 +178,47 @@ server {{
     # 2. Launch Container
     Shell.run(f"docker rm -f {Config.CONTAINER_NAME}", check=False)
     Shell.run(f"docker run -d --name {Config.CONTAINER_NAME} --restart always -p 127.0.0.1:{Config.C2_PORT}:{Config.C2_PORT} --privileged -v /root/.sliver:/root/.sliver {Config.IMAGE_NAME}")
-
-    # 3. Create the 'HEALER' Script (The Zero-Touch Enforcer)
-    # This script checks if the port is open; if not, it forces the listener.
-    # Note: We use triple quotes here too, clean and unescaped.
+    
+    # 3. INSTALL WATCHDOG HEALER (MK.XXVII)
+    logging.info("Installing Persistence Watchdog...")
+    
+    # NOTE: triple quotes are clean here.
     healer_script = f"""#!/bin/bash
-if ! netstat -tulpn | grep -q "127.0.0.1:{Config.C2_PORT}"; then
-    echo "[!] C2 Down. Re-injecting listener..." >> /var/log/hydra-healer.log
-    docker exec -i {Config.CONTAINER_NAME} {Config.BIN_PATH} < /root/.sliver/autorun.slv
+TARGET="127.0.0.1:{Config.C2_PORT}"
+LOG="/var/log/hydra-healer.log"
+
+# Check if port is open
+if ! netstat -tulpn | grep -q "\$TARGET"; then
+    echo "[!] \$(date): Listener down. Injecting configuration..." >> \$LOG
+    
+    # Inject command directly via pipe
+    echo "http -l {Config.C2_PORT}" | docker exec -i {Config.CONTAINER_NAME} {Config.BIN_PATH} >> \$LOG 2>&1
+    
+    sleep 2
+    if netstat -tulpn | grep -q "\$TARGET"; then
+        echo "[+] \$(date): Recovery Successful." >> \$LOG
+    else
+        echo "[-] \$(date): Recovery Failed." >> \$LOG
+    fi
 fi
 """
     with open("/usr/local/bin/hydra-healer.sh", "w") as f: f.write(healer_script)
     Shell.run("chmod +x /usr/local/bin/hydra-healer.sh")
 
-    # 4. Schedule the Healer (Every minute)
+    # 4. Schedule Watchdog (Every minute)
     Shell.run('(crontab -l 2>/dev/null; echo "* * * * * /usr/local/bin/hydra-healer.sh") | crontab -')
+
+    # 5. Immediate Kickstart
+    logging.info("Waiting for Sliver Database to initialize (30s)...")
+    time.sleep(30)
     
-    # 5. Initial Kickstart
-    logging.info("Initial kickstart of listener...")
-    time.sleep(10)
-    for i in range(6):
-        Shell.run("/usr/local/bin/hydra-healer.sh", check=False)
-        if f"127.0.0.1:{Config.C2_PORT}" in Shell.run("netstat -tulpn", check=False):
-            logging.info("PROJECT HYDRA IS LIVE & SELF-HEALING.")
-            return
-        time.sleep(5)
+    logging.info("Triggering initial healer run...")
+    Shell.run("/usr/local/bin/hydra-healer.sh", check=False)
     
-    logging.warning("Listener start delayed. Watchdog will retry via Cron.")
+    if f"127.0.0.1:{Config.C2_PORT}" in Shell.run("netstat -tulpn", check=False):
+        logging.info("PROJECT HYDRA IS LIVE & LISTENING.")
+    else:
+        logging.warning("Listener start delayed. Check /var/log/hydra-healer.log")
 EOF
 # ==============================================================================
 # MASTER BOOTSTRAP (bootstrap.py)
