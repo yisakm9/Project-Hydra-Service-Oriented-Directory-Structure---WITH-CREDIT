@@ -133,4 +133,6 @@ module "cloudflare_workers" {
   
   c2_backend_url        = module.cdn.cloudfront_domain_name
   worker_script_path    = abspath("${path.module}/../../../resources/workers/ghost_proxy.js")
+  # ADDED: Passing the CNAME from the tunnel module to the worker module
+  local_tunnel_cname    = module.cloudflare_tunnel.tunnel_cname
 }

@@ -17,10 +17,10 @@ resource "random_password" "tunnel_secret" {
   special = false
 }
 
-# Provision the Cloudflare Argo Tunnel
-resource "cloudflare_tunnel" "local_bridge" {
+# Updated to the modern Zero Trust resource
+resource "cloudflare_zero_trust_tunnel_cloudflared" "local_bridge" {
   account_id = var.cloudflare_account_id
   name       = "${var.project_name}-local-bridge-${var.environment}"
   secret     = base64encode(random_password.tunnel_secret.result)
-  config_src = "local" # Tells CF we will manage the routing locally
+  config_src = "local"
 }
