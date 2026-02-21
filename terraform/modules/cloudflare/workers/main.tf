@@ -13,19 +13,18 @@ data "local_file" "worker_script" {
   filename = var.worker_script_path
 }
 
-# Deploy the Worker
-resource "cloudflare_worker_script" "ghost_proxy" {
+resource "cloudflare_workers_script" "ghost_proxy" {
   account_id = var.cloudflare_account_id
   name       = "${var.project_name}-proxy-${var.environment}"
   content    = file(var.worker_script_path)
   module     = true
 
+  # Pass the CloudFront URL to the Worker
   plain_text_binding {
     name = "C2_BACKEND"
     text = "https://${var.c2_backend_url}"
   }
 }
-
 # Enable the worker on the *.workers.dev subdomain
 resource "cloudflare_worker_domain" "workers_dev" {
   account_id = var.cloudflare_account_id
