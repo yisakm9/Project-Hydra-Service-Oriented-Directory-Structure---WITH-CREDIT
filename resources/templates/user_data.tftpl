@@ -144,10 +144,9 @@ cat <<EOF > /opt/hydra/stages/network.py
 from core import Shell, logging
 from config import Config
 import time
-import pexpect
 
 def apply():
-    logging.info(">>> STAGE 4: Proxy & Human Simulation Handoff")
+    logging.info(">>> STAGE 4: Proxy & True-State Handoff")
     
     # 1. Nginx Reverse Proxy Config
     nginx_conf = f"""
@@ -170,46 +169,73 @@ server {{
     Shell.run(f"docker rm -f {Config.CONTAINER_NAME}", check=False)
     Shell.run(f"docker run -d --name {Config.CONTAINER_NAME} --restart always -p 127.0.0.1:{Config.C2_PORT}:{Config.C2_PORT} --privileged -v /root/.sliver:/root/.sliver {Config.IMAGE_NAME}")
 
-    logging.info("Waiting 20 seconds for Sliver Daemon to initialize its database...")
-    time.sleep(20)
+    # 3. Create the Robust Pexpect Injector
+    logging.info("Building Python PTY Injector...")
+    injector_py = f"""import pexpect
+import time
+import sys
 
-    # 3. --- THE HUMAN SIMULATOR (PEXPECT) ---
-    logging.info("Initializing PTY injection (Bypassing ANSI & Anti-Automation)...")
-    try:
-        # Spawn the interactive shell
-        cmd = f"docker exec -it {Config.CONTAINER_NAME} {Config.BIN_PATH}"
-        child = pexpect.spawn(cmd, encoding='utf-8', timeout=45)
-        child.logfile = open("/var/log/hydra-pexpect.log", "w")
-        
-        # THE FIX: Match the plain text right before the colored prompt
-        logging.info("Waiting for Sliver welcome banner...")
-        child.expect(r"update' command")
-        
-        # Wait 2 seconds for the prompt to finish rendering
-        time.sleep(2)
-        
-        # Type the command and press Enter
-        logging.info(f"Injecting: http -l {Config.C2_PORT}")
-        child.sendline(f"http -l {Config.C2_PORT}")
-        
-        # Give the daemon time to bind the port
-        time.sleep(3)
-        
-        # Type exit and cleanly close the session
-        child.sendline("exit")
-        time.sleep(1)
-        child.close()
-        
-        # 4. Final Host Verification
-        time.sleep(2)
-        if f"127.0.0.1:{Config.C2_PORT}" in Shell.run("netstat -tulpn", check=False):
-            logging.info("SUCCESS: Port is bound.")
-            logging.info("PROJECT HYDRA IS LIVE (ZERO TOUCH).")
-        else:
-            logging.error("Pexpect completed but port is still closed. Manual injection required.")
-            
-    except Exception as e:
-        logging.error(f"Pexpect injection failed: {e}")
+print(">>> Starting PTY Injection")
+try:
+    child = pexpect.spawn("docker exec -it {Config.CONTAINER_NAME} {Config.BIN_PATH}", encoding='utf-8', timeout=30)
+    child.logfile = sys.stdout
+    time.sleep(10) # Let the daemon UI load
+    child.sendline("") # Send enter to get prompt
+    time.sleep(2)
+    print(">>> Sending Listener Command")
+    child.sendline("http -l {Config.C2_PORT}")
+    
+    # CRITICAL FIX: Wait 10 seconds to ensure the daemon saves the job to sliver.db
+    time.sleep(10) 
+    
+    child.sendline("jobs")
+    time.sleep(2)
+    child.sendline("exit")
+    time.sleep(2)
+    child.close()
+    print(">>> Injection Complete")
+except Exception as e:
+    print(f"Error during injection: {{e}}")
+"""
+    with open("/opt/hydra/injector.py", "w") as f: f.write(injector_py)
+
+    # 4. Create the True-State Healer
+    # netstat lies because of docker-proxy. We MUST use curl.
+    logging.info("Installing True-State Watchdog...")
+    healer_script = f"""#!/bin/bash
+LOG="/var/log/hydra-healer.log"
+
+# Hit the internal port. If Sliver is listening, it returns 405 or 404.
+# If it's dead, docker-proxy drops it and returns 000 (Connection reset).
+HTTP_CODE=\$(curl -s -o /dev/null -w "%{{http_code}}" http://127.0.0.1:{Config.C2_PORT} || echo "000")
+
+if [ "\$HTTP_CODE" == "000" ] || [ "\$HTTP_CODE" == "502" ]; then
+    echo "[\$(date)] Listener down (HTTP \$HTTP_CODE). Running Injector..." >> \$LOG
+    python3 /opt/hydra/injector.py >> \$LOG 2>&1
+else
+    echo "[\$(date)] Listener Healthy (HTTP \$HTTP_CODE)." >> /tmp/healer_debug.log
+fi
+"""
+    with open("/usr/local/bin/hydra-healer.sh", "w") as f: f.write(healer_script)
+    Shell.run("chmod +x /usr/local/bin/hydra-healer.sh")
+
+    # 5. Schedule Watchdog
+    Shell.run('(crontab -l 2>/dev/null; echo "* * * * * /usr/local/bin/hydra-healer.sh") | crontab -')
+
+    # 6. Immediate Kickstart
+    logging.info("Waiting for Sliver Database to warm up (30s)...")
+    time.sleep(30)
+    
+    logging.info("Triggering initial injection...")
+    Shell.run("/usr/local/bin/hydra-healer.sh", check=False)
+    
+    # 7. Final True-State Verification
+    time.sleep(5)
+    check = Shell.run(f"curl -s -o /dev/null -w '%{{http_code}}' http://127.0.0.1:{Config.C2_PORT} || echo '000'", check=False)
+    if check != "000":
+        logging.info(f"SUCCESS: C2 is returning HTTP {check}. System is LIVE.")
+    else:
+        logging.warning("Injection delayed. Cron will retry in 60s.")
 EOF
 
 # ==============================================================================
