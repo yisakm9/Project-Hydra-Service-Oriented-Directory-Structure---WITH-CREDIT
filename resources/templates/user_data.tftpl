@@ -144,81 +144,61 @@ cat <<EOF > /opt/hydra/stages/network.py
 from core import Shell, logging
 from config import Config
 import time
-import urllib.request
-import urllib.error
 
 def apply():
-    logging.info(">>> STAGE 4: Proxy & True-State Handoff")
+    logging.info(">>> STAGE 4: Proxy & Launch")
     
-    # 1. Nginx Reverse Proxy Config
-    # We use double dollar signs ($$) so Terraform ignores them and passes a single $ to Bash
-    nginx_conf = f"""
-server {{
-    listen 80;
+    # 1. Variable-Free Nginx Config (Immune to Terraform/Bash escaping bugs)
+    # We use double curly braces {{ }} so Python f-strings ignore them.
+    nginx_conf = f"""server {{
+    listen 80 default_server;
+    server_name _;
+    
     location / {{
         proxy_pass http://127.0.0.1:{Config.C2_PORT};
-        proxy_set_header Host \$$host;
-        proxy_set_header X-Forwarded-For \$$proxy_add_x_forwarded_for;
-        error_page 502 503 504 =200 /health;
+        error_page 502 503 504 =200 @health;
     }}
-    location /health {{ return 200 'OK'; }}
+    
+    location @health {{
+        default_type text/plain;
+        return 200 'OK';
+    }}
 }}
 """
     with open("/etc/nginx/sites-available/default", "w") as f:
         f.write(nginx_conf)
+        
+    # Syntax Check to catch errors before crashing
+    check = Shell.run("nginx -t", check=False)
+    logging.info(f"Nginx Syntax Check: \n{{check}}")
     Shell.run("systemctl restart nginx")
 
     # 2. Launch Container
     Shell.run(f"docker rm -f {Config.CONTAINER_NAME}", check=False)
     Shell.run(f"docker run -d --name {Config.CONTAINER_NAME} --restart always -p 127.0.0.1:{Config.C2_PORT}:{Config.C2_PORT} --privileged -v /root/.sliver:/root/.sliver {Config.IMAGE_NAME}")
 
-    # 3. Create the Robust Pexpect Injector
-    logging.info("Building Python PTY Injector...")
-    injector_py = f"""import pexpect
-import time
-import sys
-
-try:
-    child = pexpect.spawn("docker exec -it {Config.CONTAINER_NAME} {Config.BIN_PATH}", encoding='utf-8', timeout=30)
-    time.sleep(10)
-    child.sendline("http -l {Config.C2_PORT}")
-    time.sleep(10) 
-    child.sendline("exit")
-    child.close()
-except Exception as e:
-    print(f"Error: {{e}}")
-"""
-    with open("/opt/hydra/injector.py", "w") as f: f.write(injector_py)
-
-    # 4. Create the True-State Healer
-    logging.info("Installing True-State Watchdog...")
-    # We avoid the '%%{{' sequence entirely by using a simple curl exit code check
+    # 3. Create the Watchdog Healer
+    logging.info("Installing Persistence Watchdog...")
     healer_script = f"""#!/bin/bash
 LOG="/var/log/hydra-healer.log"
+# If Sliver is dead, curl fails and returns non-zero, triggering the injection
 if ! curl -s -f http://127.0.0.1:{Config.C2_PORT} > /dev/null; then
-    echo "[\$$(date)] Listener down. Running Injector..." >> \$LOG
-    python3 /opt/hydra/injector.py >> \$LOG 2>&1
+    echo "[\$(date)] Listener down. Injecting config..." >> \$LOG
+    docker exec -i {Config.CONTAINER_NAME} {Config.BIN_PATH} < /root/.sliver/autorun.slv
 fi
 """
-    with open("/usr/local/bin/hydra-healer.sh", "w") as f: f.write(healer_script)
+    with open("/usr/local/bin/hydra-healer.sh", "w") as f: 
+        f.write(healer_script)
     Shell.run("chmod +x /usr/local/bin/hydra-healer.sh")
 
-    # 5. Schedule Watchdog
+    # 4. Schedule Watchdog
     Shell.run('(crontab -l 2>/dev/null; echo "* * * * * /usr/local/bin/hydra-healer.sh") | crontab -')
-
-    # 6. Immediate Kickstart
-    logging.info("Waiting for Sliver to warm up...")
-    time.sleep(30)
-    Shell.run("/usr/local/bin/hydra-healer.sh", check=False)
     
-    # 7. Final Verification using Python native libs (No % signs used)
-    try:
-        urllib.request.urlopen(f"http://127.0.0.1:{Config.C2_PORT}", timeout=5)
-        logging.info("SUCCESS: System is LIVE.")
-    except urllib.error.HTTPError as e:
-        logging.info(f"SUCCESS: System is LIVE (Status {{e.code}}).")
-    except Exception as e:
-        logging.warning(f"Verification pending: {{e}}")
+    # 5. Immediate Kickstart
+    logging.info("Waiting 15s for Sliver DB...")
+    time.sleep(15)
+    Shell.run("/usr/local/bin/hydra-healer.sh", check=False)
+    logging.info("PROJECT HYDRA IS LIVE.")
 EOF
 # ==============================================================================
 # MASTER BOOTSTRAP (bootstrap.py)
