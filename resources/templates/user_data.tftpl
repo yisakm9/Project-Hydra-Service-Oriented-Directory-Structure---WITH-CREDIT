@@ -144,6 +144,8 @@ cat <<EOF > /opt/hydra/stages/network.py
 from core import Shell, logging
 from config import Config
 import time
+import urllib.request
+import urllib.error
 
 def apply():
     logging.info(">>> STAGE 4: Proxy & True-State Handoff")
@@ -201,17 +203,16 @@ except Exception as e:
 
     # 4. Create the True-State Healer
     logging.info("Installing True-State Watchdog...")
-    
-    # CRITICAL FIX: '%%{{http_code}}' escapes Terraform (%%), escapes Python ({{}}), leaving '%{http_code}' for Bash
+    # curl exits with a non-zero code if the connection is reset (Sliver is dead)
+    # This completely avoids Terraform's %{{}} escaping bugs.
     healer_script = f"""#!/bin/bash
 LOG="/var/log/hydra-healer.log"
-HTTP_CODE=\$(curl -s -o /dev/null -w "%%{{http_code}}" http://127.0.0.1:{Config.C2_PORT} || echo "000")
 
-if [ "\$HTTP_CODE" == "000" ] || [ "\$HTTP_CODE" == "502" ]; then
-    echo "[\$(date)] Listener down (HTTP \$HTTP_CODE). Running Injector..." >> \$LOG
+if ! curl -s http://127.0.0.1:{Config.C2_PORT} > /dev/null; then
+    echo "[\$(date)] Listener down. Running Injector..." >> \$LOG
     python3 /opt/hydra/injector.py >> \$LOG 2>&1
 else
-    echo "[\$(date)] Listener Healthy (HTTP \$HTTP_CODE)." >> /tmp/healer_debug.log
+    echo "[\$(date)] Listener Healthy." >> /tmp/healer_debug.log
 fi
 """
     with open("/usr/local/bin/hydra-healer.sh", "w") as f: f.write(healer_script)
@@ -227,15 +228,17 @@ fi
     logging.info("Triggering initial injection...")
     Shell.run("/usr/local/bin/hydra-healer.sh", check=False)
     
-    # 7. Final True-State Verification
+    # 7. Final True-State Verification (Using Python to avoid Bash/Terraform escaping)
     time.sleep(5)
-    check = Shell.run(f"curl -s -o /dev/null -w '%%{{http_code}}' http://127.0.0.1:{Config.C2_PORT} || echo '000'", check=False)
-    if check != "000":
-        logging.info(f"SUCCESS: C2 is returning HTTP {{check}}. System is LIVE.")
-    else:
-        logging.warning("Injection delayed. Cron will retry in 60s.")
+    try:
+        urllib.request.urlopen(f"http://127.0.0.1:{Config.C2_PORT}", timeout=5)
+        logging.info("SUCCESS: C2 is responding (HTTP 200). System is LIVE.")
+    except urllib.error.HTTPError as e:
+        # Sliver will reject invalid requests with 404 or 405, meaning it IS listening!
+        logging.info(f"SUCCESS: C2 is responding (HTTP {e.code}). System is LIVE.")
+    except Exception as e:
+        logging.warning(f"Injection delayed: {e}. Cron will retry in 60s.")
 EOF
-
 # ==============================================================================
 # MASTER BOOTSTRAP (bootstrap.py)
 # ==============================================================================
