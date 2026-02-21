@@ -1,6 +1,6 @@
 #!/bin/bash
 # -----------------------------------------------------------------------------
-# PROJECT HYDRA: MODULAR BOOTSTRAP INSTALLER (MK.XXVIII) - PEXPECT SIMULATION
+# PROJECT HYDRA: MYTHIC C2 BOOTSTRAP (MK.I)
 # -----------------------------------------------------------------------------
 
 mkdir -p /opt/hydra/stages
@@ -11,22 +11,18 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update && apt-get install -y python3 python3-pip
 
 # ==============================================================================
-# MODULE 1: CONFIGURATION (config.py)
+# MODULE 1: CONFIGURATION
 # ==============================================================================
 cat <<EOF > /opt/hydra/config.py
 class Config:
     S3_BUCKET = "${s3_bucket_name}"
     AWS_REGION = "${aws_region}"
-    SLIVER_VERSION = "1.5.42"
-    SLIVER_URL = "https://github.com/BishopFox/sliver/releases/download/v1.5.42/sliver-server_linux"
-    BIN_PATH = "/usr/local/bin/sliver-server"
-    CONTAINER_NAME = "hydra-c2"
-    IMAGE_NAME = "local/sliver:latest"
-    C2_PORT = 8888
+    MYTHIC_DIR = "/opt/Mythic"
+    C2_INTERNAL_PORT = 8080 # Mythic HTTP profile will listen here
 EOF
 
 # ==============================================================================
-# MODULE 2: CORE UTILITIES (core.py)
+# MODULE 2: CORE UTILITIES
 # ==============================================================================
 cat <<EOF > /opt/hydra/core.py
 import subprocess
@@ -42,23 +38,19 @@ logging.basicConfig(
 
 class Shell:
     @staticmethod
-    def run(cmd, check=True):
+    def run(cmd, check=True, cwd=None):
         try:
             logging.info(f"EXEC: {cmd}")
-            result = subprocess.run(cmd, shell=True, check=check, capture_output=True, text=True)
+            result = subprocess.run(cmd, shell=True, check=check, capture_output=True, text=True, cwd=cwd)
             return result.stdout.strip()
         except subprocess.CalledProcessError as e:
             logging.error(f"FAIL: {cmd}\nSTDERR: {e.stderr}")
             if check: raise e
             return None
-    
-    @staticmethod
-    def exists(path):
-        return os.path.exists(path)
 EOF
 
 # ==============================================================================
-# MODULE 3: SYSTEM STAGE (stages/system.py)
+# MODULE 3: SYSTEM PREP
 # ==============================================================================
 cat <<EOF > /opt/hydra/stages/system.py
 from core import Shell, logging
@@ -66,8 +58,7 @@ import os
 
 def apply():
     logging.info(">>> STAGE 1: System Prep")
-    # Added python3-pexpect to install list
-    Shell.run("apt-get update && apt-get install -y nginx curl wget jq unzip net-tools build-essential libcap2-bin python3-pexpect")
+    Shell.run("apt-get update && apt-get install -y nginx curl wget jq unzip net-tools git make")
     Shell.run("systemctl start nginx && systemctl enable nginx")
     
     if not os.path.exists("/usr/local/bin/aws"):
@@ -80,156 +71,105 @@ def apply():
 EOF
 
 # ==============================================================================
-# MODULE 4: SLIVER STAGE (stages/sliver.py)
-# ==============================================================================
-cat <<EOF > /opt/hydra/stages/sliver.py
-from core import Shell, logging
-from config import Config
-import os
-
-def apply():
-    logging.info(">>> STAGE 2: Sliver Assets")
-    Shell.run(f"wget -q '{Config.SLIVER_URL}' -O {Config.BIN_PATH}")
-    Shell.run(f"chmod +x {Config.BIN_PATH}")
-    
-    Shell.run("mkdir -p /root/.sliver")
-    restore_cmd = f"aws s3 cp s3://{Config.S3_BUCKET}/backups/latest_sliver_state.tar.gz /tmp/sliver_backup.tar.gz --region {Config.AWS_REGION}"
-    
-    if Shell.run(restore_cmd, check=False):
-        Shell.run("tar -xzvf /tmp/sliver_backup.tar.gz -C /root/", check=False)
-    
-    Shell.run("chown -R root:root /root/.sliver")
-EOF
-
-# ==============================================================================
-# MODULE 5: DOCKER STAGE (stages/docker.py)
+# MODULE 4: DOCKER
 # ==============================================================================
 cat <<EOF > /opt/hydra/stages/docker.py
 from core import Shell, logging
-from config import Config
-import time
 import os
-import sys
 
 def apply():
-    logging.info(">>> STAGE 3: Docker & Build")
+    logging.info(">>> STAGE 2: Docker Engine")
     if not os.path.exists("/usr/bin/docker"):
         Shell.run("curl -fsSL https://get.docker.com | sh")
         Shell.run("systemctl enable docker && systemctl start docker")
-    
-    if not os.path.exists(Config.BIN_PATH):
-        logging.error(f"CRITICAL: Binary not found at {Config.BIN_PATH}")
-        sys.exit(1)
-
-    dockerfile = f"""
-FROM ubuntu:24.04
-RUN apt-get update && apt-get install -y ca-certificates libcap2-bin && rm -rf /var/lib/apt/lists/*
-COPY sliver-server {Config.BIN_PATH}
-RUN chmod +x {Config.BIN_PATH}
-ENV HOME=/root
-WORKDIR /root
-ENTRYPOINT ["{Config.BIN_PATH}", "daemon"]
-"""
-    with open("/tmp/Dockerfile", "w") as f:
-        f.write(dockerfile)
         
-    Shell.run(f"cp {Config.BIN_PATH} /tmp/sliver-server")
-    Shell.run(f"docker build -t {Config.IMAGE_NAME} /tmp")
+    # Mythic requires docker-compose plugin
+    Shell.run("apt-get install -y docker-compose-plugin")
 EOF
 
 # ==============================================================================
-# MODULE 6: NETWORK STAGE (stages/network.py)
+# MODULE 5: MYTHIC C2
+# ==============================================================================
+cat <<EOF > /opt/hydra/stages/mythic.py
+from core import Shell, logging
+from config import Config
+import os
+
+def apply():
+    logging.info(">>> STAGE 3: Mythic Deployment")
+    
+    if not os.path.exists(Config.MYTHIC_DIR):
+        Shell.run(f"git clone https://github.com/its-a-feature/Mythic.git {Config.MYTHIC_DIR}")
+    
+    # Install Agents and Profiles
+    logging.info("Installing Apollo (Windows Agent) & HTTP Profile...")
+    Shell.run("./mythic-cli install github https://github.com/MythicAgents/Apollo.git", cwd=Config.MYTHIC_DIR)
+    Shell.run("./mythic-cli install github https://github.com/MythicC2Profiles/http.git", cwd=Config.MYTHIC_DIR)
+    
+    # Start Mythic (This builds the docker containers automatically)
+    logging.info("Building and Starting Mythic (This takes a few minutes)...")
+    Shell.run("./mythic-cli start", cwd=Config.MYTHIC_DIR)
+    
+    # Setup Backup Cron
+    backup_script = f"""#!/bin/bash
+tar -czf /tmp/mythic_backup.tar.gz -C /opt Mythic
+aws s3 cp /tmp/mythic_backup.tar.gz s3://{Config.S3_BUCKET}/backups/latest_mythic_state.tar.gz --region {Config.AWS_REGION}
+"""
+    with open("/usr/local/bin/hydra-backup.sh", "w") as f: f.write(backup_script)
+    Shell.run("chmod +x /usr/local/bin/hydra-backup.sh")
+    Shell.run('(crontab -l 2>/dev/null; echo "0 2 * * * /usr/local/bin/hydra-backup.sh") | crontab -')
+EOF
+
+# ==============================================================================
+# MODULE 6: NETWORK PROXY
 # ==============================================================================
 cat <<EOF > /opt/hydra/stages/network.py
 from core import Shell, logging
 from config import Config
-import time
 
 def apply():
-    logging.info(">>> STAGE 4: Proxy & Launch")
+    logging.info(">>> STAGE 4: Proxy & ALB Integration")
     
-    # 1. Variable-Free Nginx Config (Immune to Terraform/Bash escaping bugs)
-    # We use double curly braces {{ }} so Python f-strings ignore them.
-    nginx_conf = f"""server {{
+    # Nginx catches ALB health checks (200 OK) and proxies C2 traffic to 8080
+    nginx_conf = f"""
+server {{
     listen 80 default_server;
     server_name _;
     
     location / {{
-        proxy_pass http://127.0.0.1:{Config.C2_PORT};
-        error_page 502 503 504 =200 @health;
+        proxy_pass http://127.0.0.1:{Config.C2_INTERNAL_PORT};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        error_page 502 503 504 =200 /health;
     }}
-    
-    location @health {{
-        default_type text/plain;
-        return 200 'OK';
-    }}
+    location /health {{ return 200 'OK'; }}
 }}
 """
     with open("/etc/nginx/sites-available/default", "w") as f:
         f.write(nginx_conf)
         
-    # Syntax Check to catch errors before crashing
-    check = Shell.run("nginx -t", check=False)
-    logging.info(f"Nginx Syntax Check: \n{{check}}")
     Shell.run("systemctl restart nginx")
-
-    # 2. Launch Container
-    Shell.run(f"docker rm -f {Config.CONTAINER_NAME}", check=False)
-    Shell.run(f"docker run -d --name {Config.CONTAINER_NAME} --restart always -p 127.0.0.1:{Config.C2_PORT}:{Config.C2_PORT} --privileged -v /root/.sliver:/root/.sliver {Config.IMAGE_NAME}")
-
-    # 3. Create the Watchdog Healer
-    logging.info("Installing Persistence Watchdog...")
-    healer_script = f"""#!/bin/bash
-LOG="/var/log/hydra-healer.log"
-# If Sliver is dead, curl fails and returns non-zero, triggering the injection
-if ! curl -s -f http://127.0.0.1:{Config.C2_PORT} > /dev/null; then
-    echo "[\$(date)] Listener down. Injecting config..." >> \$LOG
-    docker exec -i {Config.CONTAINER_NAME} {Config.BIN_PATH} < /root/.sliver/autorun.slv
-fi
-"""
-    with open("/usr/local/bin/hydra-healer.sh", "w") as f: 
-        f.write(healer_script)
-    Shell.run("chmod +x /usr/local/bin/hydra-healer.sh")
-
-    # 4. Schedule Watchdog
-    Shell.run('(crontab -l 2>/dev/null; echo "* * * * * /usr/local/bin/hydra-healer.sh") | crontab -')
-    
-    # 5. Immediate Kickstart
-    logging.info("Waiting 15s for Sliver DB...")
-    time.sleep(15)
-    Shell.run("/usr/local/bin/hydra-healer.sh", check=False)
-    logging.info("PROJECT HYDRA IS LIVE.")
+    logging.info("PROJECT HYDRA (MYTHIC) IS LIVE.")
 EOF
+
 # ==============================================================================
-# MASTER BOOTSTRAP (bootstrap.py)
+# MASTER BOOTSTRAP
 # ==============================================================================
 cat <<EOF > /opt/hydra/bootstrap.py
 import sys
 from core import logging
-import stages.system
-import stages.docker
-import stages.sliver
-import stages.network
+import stages.system, stages.docker, stages.mythic, stages.network
 
-def main():
-    logging.info(">>> STARTING MODULAR BOOTSTRAP <<<")
+if __name__ == "__main__":
     try:
         stages.system.apply()
-        stages.sliver.apply()
         stages.docker.apply()
+        stages.mythic.apply()
         stages.network.apply()
     except Exception as e:
         logging.critical(f"FATAL: {e}")
-        import subprocess
-        subprocess.run("systemctl start nginx", shell=True)
         sys.exit(1)
-
-if __name__ == "__main__":
-    main()
 EOF
 
-# ==============================================================================
-# EXECUTE
-# ==============================================================================
 touch /opt/hydra/stages/__init__.py
 python3 /opt/hydra/bootstrap.py

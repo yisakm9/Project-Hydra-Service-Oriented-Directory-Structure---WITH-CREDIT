@@ -60,7 +60,14 @@ resource "aws_security_group" "c2_sg" {
     protocol    = "tcp"
     cidr_blocks = [var.my_ip]
   }
-
+# Inbound: Mythic Web UI - Strictly limited to YOUR IP
+  ingress {
+    description = "Mythic Web UI"
+    from_port   = 7443
+    to_port     = 7443
+    protocol    = "tcp"
+    cidr_blocks = [var.my_ip]
+  }
   # Outbound: Allow EC2 to talk to S3/SQS/Updates
   egress {
     description = "Allow all outbound"
