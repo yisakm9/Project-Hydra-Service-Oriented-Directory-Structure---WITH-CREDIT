@@ -155,10 +155,10 @@ import time
 def apply():
     logging.info(">>> STAGE 4: Proxy & Launch")
     
-    # 1. Nginx Reverse Proxy (Sidecar)
-    # Listens on Port 80 (External) -> Forwards to 127.0.0.1:8888 (Internal)
-    # Includes error_page hack to keep AWS ALB happy even if Sliver is rebooting
-    nginx_conf = f\"\"\"
+    # 1. Nginx Reverse Proxy Config
+    # We use double curly braces {{ }} for Nginx blocks so Python ignores them.
+    # We use single curly braces { } for Python variables like Config.C2_PORT.
+    nginx_conf = f"""
 server {{
     listen 80;
     location / {{
@@ -169,51 +169,41 @@ server {{
     }}
     location /health {{ return 200 'OK'; }}
 }}
-\"\"\"
+"""
     with open("/etc/nginx/sites-available/default", "w") as f:
         f.write(nginx_conf)
     Shell.run("systemctl restart nginx")
 
     # 2. Launch Container
-    # We bind 127.0.0.1:8888 so ONLY Nginx (on the host) can talk to Sliver
     Shell.run(f"docker rm -f {Config.CONTAINER_NAME}", check=False)
     Shell.run(f"docker run -d --name {Config.CONTAINER_NAME} --restart always -p 127.0.0.1:{Config.C2_PORT}:{Config.C2_PORT} --privileged -v /root/.sliver:/root/.sliver {Config.IMAGE_NAME}")
-    
-    # 3. INSTALL WATCHDOG HEALER (The Zero-Touch Fix)
-    # This script runs every minute. If port 8888 is closed, it forces the listener on.
-    logging.info("Installing Persistence Watchdog...")
-    healer_script = f\"\"\"#!/bin/bash
+
+    # 3. Create the 'HEALER' Script (The Zero-Touch Enforcer)
+    # This script checks if the port is open; if not, it forces the listener.
+    # Note: We use triple quotes here too, clean and unescaped.
+    healer_script = f"""#!/bin/bash
 if ! netstat -tulpn | grep -q "127.0.0.1:{Config.C2_PORT}"; then
-    echo "[!] Listener down. Injecting configuration..." >> /var/log/hydra-healer.log
+    echo "[!] C2 Down. Re-injecting listener..." >> /var/log/hydra-healer.log
     docker exec -i {Config.CONTAINER_NAME} {Config.BIN_PATH} < /root/.sliver/autorun.slv
 fi
-\"\"\"
+"""
     with open("/usr/local/bin/hydra-healer.sh", "w") as f: f.write(healer_script)
     Shell.run("chmod +x /usr/local/bin/hydra-healer.sh")
 
-    # 4. Schedule Watchdog (Every minute via Cron)
+    # 4. Schedule the Healer (Every minute)
     Shell.run('(crontab -l 2>/dev/null; echo "* * * * * /usr/local/bin/hydra-healer.sh") | crontab -')
-
-    # 5. Immediate Kickstart Loop
-    # We run the healer immediately to ensure the listener starts NOW (during boot)
-    logging.info("Waiting for Sliver listener to stabilize...")
-    time.sleep(10) # Initial warm-up for DB migration inside container
     
-    for i in range(12): # Try for 60 seconds
-        # Force run the healer
+    # 5. Initial Kickstart
+    logging.info("Initial kickstart of listener...")
+    time.sleep(10)
+    for i in range(6):
         Shell.run("/usr/local/bin/hydra-healer.sh", check=False)
-        
-        # Check socket
-        netstat = Shell.run("netstat -tulpn", check=False)
-        if f"127.0.0.1:{Config.C2_PORT}" in netstat:
-            logging.info("SUCCESS: Sliver listener is active.")
-            logging.info("PROJECT HYDRA IS LIVE.")
+        if f"127.0.0.1:{Config.C2_PORT}" in Shell.run("netstat -tulpn", check=False):
+            logging.info("PROJECT HYDRA IS LIVE & SELF-HEALING.")
             return
-        
-        logging.info(f"Listener not ready (Attempt {i+1}/12)...")
         time.sleep(5)
     
-    logging.warning("Bootstrap finished. Watchdog will handle remaining retries via Cron.")
+    logging.warning("Listener start delayed. Watchdog will retry via Cron.")
 EOF
 # ==============================================================================
 # MASTER BOOTSTRAP (bootstrap.py)
