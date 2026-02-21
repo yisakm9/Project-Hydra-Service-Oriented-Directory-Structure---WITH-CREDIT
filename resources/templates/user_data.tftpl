@@ -122,15 +122,14 @@ def apply():
         Shell.run("curl -fsSL https://get.docker.com | sh")
         Shell.run("systemctl enable docker && systemctl start docker")
     
-    # Validate Binary Exists (Crucial Fix)
     if not os.path.exists(Config.BIN_PATH):
         logging.error(f"CRITICAL: Binary not found at {Config.BIN_PATH}")
         sys.exit(1)
 
-    # Use standard f-string without backslash escapes for the Dockerfile content
+    # ADDED 'tmux' TO THE INSTALL LIST
     dockerfile = f"""
 FROM ubuntu:24.04
-RUN apt-get update && apt-get install -y ca-certificates libcap2-bin && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ca-certificates libcap2-bin tmux && rm -rf /var/lib/apt/lists/*
 COPY sliver-server {Config.BIN_PATH}
 RUN chmod +x {Config.BIN_PATH}
 ENV HOME=/root
@@ -155,10 +154,6 @@ import time
 def apply():
     logging.info(">>> STAGE 4: Proxy & Launch")
     
-    # 1. Nginx Reverse Proxy Config
-    # NOTE: We use double curly braces {{ }} for literal Nginx braces.
-    # We use single curly braces { } for Python f-string variables.
-    # We escape \$host so Bash preserves it, but Python writes it as-is.
     nginx_conf = f"""
 server {{
     listen 80;
@@ -175,44 +170,50 @@ server {{
         f.write(nginx_conf)
     Shell.run("systemctl restart nginx")
 
-    # 2. Launch Container
     Shell.run(f"docker rm -f {Config.CONTAINER_NAME}", check=False)
     Shell.run(f"docker run -d --name {Config.CONTAINER_NAME} --restart always -p 127.0.0.1:{Config.C2_PORT}:{Config.C2_PORT} --privileged -v /root/.sliver:/root/.sliver {Config.IMAGE_NAME}")
     
-    # 3. INSTALL WATCHDOG HEALER (MK.XXVII)
-    logging.info("Installing Persistence Watchdog...")
+    # 3. INSTALL WATCHDOG HEALER (The Tmux Simulator)
+    logging.info("Installing Tmux Persistence Watchdog...")
     
-    # NOTE: triple quotes are clean here.
     healer_script = f"""#!/bin/bash
 TARGET="127.0.0.1:{Config.C2_PORT}"
 LOG="/var/log/hydra-healer.log"
 
-# Check if port is open
 if ! netstat -tulpn | grep -q "\$TARGET"; then
-    echo "[!] \$(date): Listener down. Injecting configuration..." >> \$LOG
+    echo "[\$(date)] Listener down. Initiating Tmux keystroke simulation..." >> \$LOG
     
-    # Inject command directly via pipe
-    echo "http -l {Config.C2_PORT}" | docker exec -i {Config.CONTAINER_NAME} {Config.BIN_PATH} >> \$LOG 2>&1
+    # 1. Start a hidden terminal session running the Sliver Console
+    docker exec {Config.CONTAINER_NAME} tmux new-session -d -s injector "{Config.BIN_PATH}"
     
+    # 2. Wait for the console to connect to the daemon (Red Sliver Logo)
+    sleep 10
+    
+    # 3. Simulate typing the command and pressing Enter (C-m)
+    docker exec {Config.CONTAINER_NAME} tmux send-keys -t injector "http -l {Config.C2_PORT}" C-m
+    
+    # 4. Wait for it to process, then type exit and press Enter
+    sleep 5
+    docker exec {Config.CONTAINER_NAME} tmux send-keys -t injector "exit" C-m
+    
+    # 5. Check if it worked
     sleep 2
     if netstat -tulpn | grep -q "\$TARGET"; then
-        echo "[+] \$(date): Recovery Successful." >> \$LOG
+        echo "[\$(date)] SUCCESS: Listener is active." >> \$LOG
     else
-        echo "[-] \$(date): Recovery Failed." >> \$LOG
+        echo "[\$(date)] FAILED: Injection missed." >> \$LOG
     fi
 fi
 """
     with open("/usr/local/bin/hydra-healer.sh", "w") as f: f.write(healer_script)
     Shell.run("chmod +x /usr/local/bin/hydra-healer.sh")
 
-    # 4. Schedule Watchdog (Every minute)
     Shell.run('(crontab -l 2>/dev/null; echo "* * * * * /usr/local/bin/hydra-healer.sh") | crontab -')
 
-    # 5. Immediate Kickstart
-    logging.info("Waiting for Sliver Database to initialize (30s)...")
-    time.sleep(30)
+    logging.info("Waiting for Sliver Daemon to initialize (20s)...")
+    time.sleep(20)
     
-    logging.info("Triggering initial healer run...")
+    logging.info("Triggering initial Tmux healer run...")
     Shell.run("/usr/local/bin/hydra-healer.sh", check=False)
     
     if f"127.0.0.1:{Config.C2_PORT}" in Shell.run("netstat -tulpn", check=False):
