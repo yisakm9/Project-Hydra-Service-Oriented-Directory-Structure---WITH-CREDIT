@@ -96,32 +96,45 @@ from config import Config
 import os
 
 def apply():
-    logging.info(">>> STAGE 3: Mythic Deployment")
+    logging.info(">>> STAGE 3: Mythic Deployment & Phoenix Restore")
     
-    if not os.path.exists(Config.MYTHIC_DIR):
-        Shell.run(f"git clone https://github.com/its-a-feature/Mythic.git {Config.MYTHIC_DIR}")
+    # 1. Attempt Phoenix Restore from S3
+    restore_cmd = f"aws s3 cp s3://{Config.S3_BUCKET}/backups/latest_mythic_state.tar.gz /tmp/mythic_backup.tar.gz --region {Config.AWS_REGION}"
     
-    # CRITICAL FIX: Compile the mythic-cli binary using 'make'
-    logging.info("Compiling mythic-cli...")
-    Shell.run("make", cwd=Config.MYTHIC_DIR)
+    if Shell.run(restore_cmd, check=False):
+        logging.info("[*] State found in S3! Restoring full Mythic environment...")
+        Shell.run("rm -rf /opt/Mythic", check=False)
+        # Extract the backup to /opt (which reconstructs /opt/Mythic)
+        Shell.run("tar -xzvf /tmp/mythic_backup.tar.gz -C /opt/", check=False)
+        Shell.run("make", cwd=Config.MYTHIC_DIR)
+        
+        logging.info("[*] Starting restored Mythic instance. Listeners will auto-resume...")
+        Shell.run("./mythic-cli start", cwd=Config.MYTHIC_DIR)
+        
+    # 2. Fresh Installation (If no backup is found)
+    else:
+        logging.info("[!] No backup found. Initiating fresh Mythic installation...")
+        if not os.path.exists(Config.MYTHIC_DIR):
+            Shell.run(f"git clone https://github.com/its-a-feature/Mythic.git {Config.MYTHIC_DIR}")
+        
+        Shell.run("make", cwd=Config.MYTHIC_DIR)
+        Shell.run("./mythic-cli install github https://github.com/MythicAgents/Apollo.git", cwd=Config.MYTHIC_DIR)
+        Shell.run("./mythic-cli install github https://github.com/MythicC2Profiles/http.git", cwd=Config.MYTHIC_DIR)
+        
+        logging.info("[*] Building and Starting Mythic (This takes a few minutes)...")
+        Shell.run("./mythic-cli start", cwd=Config.MYTHIC_DIR)
     
-    # Install Agents and Profiles
-    logging.info("Installing Apollo (Windows Agent) & HTTP Profile...")
-    Shell.run("./mythic-cli install github https://github.com/MythicAgents/Apollo.git", cwd=Config.MYTHIC_DIR)
-    Shell.run("./mythic-cli install github https://github.com/MythicC2Profiles/http.git", cwd=Config.MYTHIC_DIR)
-    
-    # Start Mythic (This builds the docker containers automatically)
-    logging.info("Building and Starting Mythic (This takes a few minutes)...")
-    Shell.run("./mythic-cli start", cwd=Config.MYTHIC_DIR)
-    
-    # Setup Backup Cron (Backs up the entire Mythic directory to S3)
+    # 3. Setup the Persistent Backup Cron Job
+    # This backs up the entire Mythic directory (including the Postgres DB volumes)
     backup_script = f"""#!/bin/bash
 tar -czf /tmp/mythic_backup.tar.gz -C /opt Mythic
 aws s3 cp /tmp/mythic_backup.tar.gz s3://{Config.S3_BUCKET}/backups/latest_mythic_state.tar.gz --region {Config.AWS_REGION}
 """
     with open("/usr/local/bin/hydra-backup.sh", "w") as f: f.write(backup_script)
     Shell.run("chmod +x /usr/local/bin/hydra-backup.sh")
-    Shell.run('(crontab -l 2>/dev/null; echo "0 2 * * * /usr/local/bin/hydra-backup.sh") | crontab -')
+    
+    # Run backup every hour
+    Shell.run('(crontab -l 2>/dev/null; echo "0 * * * * /usr/local/bin/hydra-backup.sh") | crontab -')
 EOF
 
 # ==============================================================================
