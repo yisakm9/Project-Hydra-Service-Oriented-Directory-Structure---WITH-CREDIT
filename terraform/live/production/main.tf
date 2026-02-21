@@ -60,7 +60,7 @@ module "security" {
 }
 
 # ==============================================================================
-# 3. TRAFFIC DELIVERY (ALB & CLOUDFRONT)
+# 3.   TRAFFIC DELIVERY (ALB & CLOUDFRONT)
 # ==============================================================================
 
 module "load_balancing" {
