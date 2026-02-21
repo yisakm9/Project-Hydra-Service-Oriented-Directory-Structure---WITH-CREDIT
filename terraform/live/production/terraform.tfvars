@@ -4,7 +4,7 @@
 #admin_ip       = "196.190.51.72/32" # Check ipinfo.io or https://whatsmyip.com
 
 # Cloudflare
-#cloudflare_api_token  = "D3DGsYdTPL_MYbQaXRc4TosW8eICsNh_QQcLMAw4"
+#cloudflare_api_token  = "J9_DtVYArlS7eFuqOCI_Lj4FacNk03F2tYl1Wedz"
 #cloudflare_account_id = "f69ff7ad7f66c5ec9b2ac5a0f618032a"
 
 
@@ -13,5 +13,5 @@
 #hydra_secret_header = "super-secret-password-123"
 
 #aws_region           = "us-east-1"
-my_ip                = "196.190.51.72/32" 
-cloudflare_api_token = "D3DGsYdTPL_MYbQaXRc4TosW8eICsNh_QQcLMAw4"
+#my_ip                = "196.190.51.72/32" 
+#cloudflare_api_token = "J9_DtVYArlS7eFuqOCI_Lj4FacNk03F2tYl1Wedz"
