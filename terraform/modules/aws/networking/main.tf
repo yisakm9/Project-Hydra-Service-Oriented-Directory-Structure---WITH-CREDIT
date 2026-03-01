@@ -24,6 +24,9 @@ resource "aws_internet_gateway" "main" {
     Name    = "${var.project_name}-igw-${var.environment}"
     Project = var.project_name
   }
+   # Ensure the VPC isn't destroyed until the IGW is completely gone
+  depends_on = [aws_vpc.main]
+
 }
 
 # --- 3. Public Subnets (x2) ---
@@ -37,6 +40,8 @@ resource "aws_subnet" "public" {
   
   # CRITICAL: Instances must get public IPs to reach S3/SQS without a NAT Gateway
   map_public_ip_on_launch = true 
+
+  depends_on =[aws_internet_gateway.main]
 
   tags = {
     Name    = "${var.project_name}-public-subnet-${count.index + 1}"

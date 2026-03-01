@@ -7,7 +7,9 @@ resource "aws_cloudfront_distribution" "c2_cdn" {
   is_ipv6_enabled     = true
   comment             = "Hydra C2 Ops"
   price_class         = "PriceClass_100" # Use only US/EU/Canada (Cheapest)
-
+  
+  retain_on_delete    = true 
+  wait_for_deployment = false
   # --- 1. The Origin (Where traffic goes) ---
   origin {
     domain_name = var.origin_domain_name
