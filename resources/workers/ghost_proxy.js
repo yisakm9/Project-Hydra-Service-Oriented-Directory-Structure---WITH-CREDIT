@@ -1,47 +1,54 @@
 /**
- * Project Hydra: Advanced Edge Redirector (Cloudflare Worker)
- * Features: Explicit Host rewriting, Method passthrough, Header Scrubbing
+ * Project Hydra: Clean Edge Redirector (Cloudflare Worker)
+ * Safely forwards traffic to CloudFront while bypassing Cloudflare 1016 security filters.
  */
 export default {
   async fetch(request, env) {
-    const url = new URL(request.url);
-    const backend = new URL(env.C2_BACKEND);
+    const originalUrl = new URL(request.url);
+    const targetUrl = new URL(env.C2_BACKEND);
 
-    // Construct the true destination URL
-    const targetUrl = new URL(url.pathname + url.search, backend);
+    // Copy the path and query parameters to the AWS destination
+    targetUrl.pathname = originalUrl.pathname;
+    targetUrl.search = originalUrl.search;
 
-    // CRITICAL FIX: Clone headers and rewrite the 'Host' to match CloudFront
-    const newHeaders = new Headers(request.headers);
-    newHeaders.set("Host", backend.hostname);
+    // Create a new Headers object to sanitize the request
+    const proxyHeaders = new Headers();
 
-    // Build the clean proxy request configuration
-    const init = {
-      method: request.method,
-      headers: newHeaders,
-      redirect: "manual"
-    };
-
-    // Body cannot be attached to GET or HEAD requests
-    if (request.method !== "GET" && request.method !== "HEAD") {
-      init.body = request.body;
+    // Copy all safe headers from the implant, strictly dropping the Host and Cloudflare trace headers
+    for (const [key, value] of request.headers.entries()) {
+      const lowerKey = key.toLowerCase();
+      if (lowerKey !== 'host' && !lowerKey.startsWith('cf-') && lowerKey !== 'x-forwarded-proto') {
+        proxyHeaders.set(key, value);
+      }
     }
 
-    const proxyRequest = new Request(targetUrl, init);
+    // Build the clean request
+    const proxyRequest = new Request(targetUrl.toString(), {
+      method: request.method,
+      headers: proxyHeaders,
+      // Only attach body if it's a POST/PUT request
+      body: (request.method !== 'GET' && request.method !== 'HEAD') ? request.body : null,
+      redirect: 'manual'
+    });
 
     try {
       const response = await fetch(proxyRequest);
 
-      // Sanitize the response headers to hide AWS/CloudFront origins
-      const newResponse = new Response(response.body, response);
-      newResponse.headers.delete("Server");
-      newResponse.headers.delete("X-Cache");
-      newResponse.headers.delete("Via");
-      newResponse.headers.delete("X-Amz-Cf-Pop");
-      newResponse.headers.delete("X-Amz-Cf-Id");
+      const newResponseHeaders = new Headers(response.headers);
+      // Scrub AWS and CloudFront tracing headers for maximum stealth
+      newResponseHeaders.delete("Server");
+      newResponseHeaders.delete("X-Cache");
+      newResponseHeaders.delete("Via");
+      newResponseHeaders.delete("X-Amz-Cf-Pop");
+      newResponseHeaders.delete("X-Amz-Cf-Id");
 
-      return newResponse;
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: newResponseHeaders
+      });
     } catch (e) {
-      return new Response("Service Unavailable: " + e.message, { status: 503 });
+      return new Response("Backend Offline", { status: 502 });
     }
   }
 };
