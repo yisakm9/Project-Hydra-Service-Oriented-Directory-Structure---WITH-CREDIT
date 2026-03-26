@@ -25,9 +25,6 @@ resource "google_compute_instance_template" "c2_template" {
     disk_size_gb = 30
     disk_type    = "pd-ssd"
 
-    disk_encryption_key {
-      # Uses Google-managed encryption; swap to CMEK key if KMS module is wired
-    }
   }
 
   network_interface {
