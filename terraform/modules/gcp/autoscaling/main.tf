@@ -33,9 +33,8 @@ resource "google_compute_instance_template" "c2_template" {
   network_interface {
     subnetwork = var.subnet_ids[0]
 
-    # No external IP — Cloud NAT handles outbound
-    # Uncomment access_config for direct SSH (without tunnel)
-    # access_config {}
+    # Ephemeral external IP (Cloud NAT removed to save ~$32/month)
+    access_config {}
   }
 
   service_account {

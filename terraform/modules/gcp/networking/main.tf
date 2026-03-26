@@ -27,25 +27,5 @@ resource "google_compute_subnetwork" "public" {
   }
 }
 
-# --- 3. Cloud Router (for Cloud NAT if needed later) ---
-resource "google_compute_router" "main" {
-  name    = "${var.project_name}-router-${var.environment}"
-  region  = var.gcp_region
-  network = google_compute_network.main.id
-}
-
-# --- 4. Cloud NAT (instances don't need public IPs to reach internet) ---
-# Unlike AWS where we needed map_public_ip_on_launch, GCP Cloud NAT
-# gives outbound internet without exposing instance IPs
-resource "google_compute_router_nat" "main" {
-  name                               = "${var.project_name}-nat-${var.environment}"
-  router                             = google_compute_router.main.name
-  region                             = var.gcp_region
-  nat_ip_allocate_option             = "AUTO_ONLY"
-  source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
-
-  log_config {
-    enable = true
-    filter = "ERRORS_ONLY"
-  }
-}
+# NOTE: Cloud NAT removed to save ~$32/month.
+# Instances use ephemeral external IPs via access_config instead.

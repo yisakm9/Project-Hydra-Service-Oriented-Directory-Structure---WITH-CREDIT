@@ -2,7 +2,7 @@ terraform {
   required_version = ">= 1.13.1"
 
   backend "gcs" {
-    bucket = "hydra-terraform-state"
+    bucket = "hydra-tfstate-ab6b9368"
     prefix = "hydra/production/terraform.tfstate"
   }
 
