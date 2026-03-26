@@ -64,6 +64,7 @@ jobs:
     name: "📝 Terraform Plan"
     needs: lint-and-scan
     runs-on: ubuntu-latest
+    environment: production
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
