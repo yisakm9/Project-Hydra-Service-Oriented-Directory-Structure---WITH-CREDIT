@@ -17,8 +17,6 @@ env:
   TF_VERSION: 1.13.1
   GCP_REGION: us-central1
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  WIF_PROVIDER: ${{ secrets.GCP_WIF_PROVIDER }}
-  WIF_SERVICE_ACCOUNT: ${{ secrets.GCP_WIF_SERVICE_ACCOUNT }}
 
 jobs:
   terraform-destroy:
@@ -42,8 +40,8 @@ jobs:
       - name: Authenticate to GCP (Workload Identity Federation)
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ env.WIF_PROVIDER }}
-          service_account: ${{ env.WIF_SERVICE_ACCOUNT }}
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_WIF_SERVICE_ACCOUNT }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
