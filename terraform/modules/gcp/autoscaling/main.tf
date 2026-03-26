@@ -59,7 +59,7 @@ resource "google_compute_health_check" "c2_health" {
   check_interval_sec  = 15
   timeout_sec         = 5
   healthy_threshold   = 2
-  unhealthy_threshold = 3
+  unhealthy_threshold = 10
 
   http_health_check {
     port         = 80
@@ -85,7 +85,7 @@ resource "google_compute_instance_group_manager" "c2_mig" {
 
   auto_healing_policies {
     health_check      = google_compute_health_check.c2_health.id
-    initial_delay_sec = 1200 # 20 min for Mythic to fully bootstrap
+    initial_delay_sec = 2400 # 40 min — Mythic needs ~25 min to fully bootstrap
   }
 
   update_policy {
