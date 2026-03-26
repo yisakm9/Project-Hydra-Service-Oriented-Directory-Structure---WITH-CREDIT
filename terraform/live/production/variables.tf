@@ -12,7 +12,7 @@ variable "gcp_region" {
 variable "gcp_zone" {
   description = "GCP Zone for zonal resources"
   type        = string
-  default     = "us-central1-a"
+  default     = "us-central1-f"
 }
 
 variable "my_ip" {
