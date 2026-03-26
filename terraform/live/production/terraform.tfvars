@@ -8,7 +8,7 @@
 gcp_project_id = "web-analytics-prod-491408"        # Your GCP Project ID
 gcp_region     = "us-central1"
 gcp_zone       = "us-central1-a"
-my_ip          = "196.188.181.54/32"        # Your IP in CIDR format, e.g. "1.2.3.4/32"
+my_ip          = "196.188.180.145/32"        # Your IP in CIDR format, e.g. "1.2.3.4/32"
 
 # Cloudflare
 cloudflare_api_token  = "cfut_hdNz76w9PjLINBbabLpzEwdCUrzt2OqZw3m3AocDd10412f5" # Cloudflare API token
