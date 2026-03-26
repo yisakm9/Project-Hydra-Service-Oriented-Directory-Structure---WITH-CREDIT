@@ -31,6 +31,7 @@ permissions:
   pull-requests: write
 
 env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   TF_ROOT: terraform/live/production
   TF_VERSION: 1.13.1
   GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}

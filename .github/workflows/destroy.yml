@@ -16,6 +16,7 @@ env:
   TF_ROOT: terraform/live/production
   TF_VERSION: 1.13.1
   GCP_REGION: us-central1
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   WIF_PROVIDER: ${{ secrets.GCP_WIF_PROVIDER }}
   WIF_SERVICE_ACCOUNT: ${{ secrets.GCP_WIF_SERVICE_ACCOUNT }}
 
