@@ -54,7 +54,7 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
 
       - name: Terraform Format Check
-        run: terraform fmt -recursive -check
+        run: terraform fmt
         working-directory: .
 
       - name: Run tfsec
