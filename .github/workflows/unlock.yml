@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       lock_id:
-        description: 'The Lock ID (found in the "Error: Error acquiring the state lock" message)'
+        description: 'The Lock ID (found in the "Error locking state" message)'
         required: true
         type: string
 
@@ -13,27 +13,26 @@ permissions:
   contents: read
 
 env:
-  TF_ROOT: terraform/live/production  # Aligned with Phase 6
-  TF_VERSION: 1.13.1                 # Using stable latest
-  AWS_REGION: us-east-2               # Aligned with the move to Ohio
-  # Using the secret for the account ID to keep the workflow modular
-  IAM_ROLE_ARN: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHubActionsRole
+  TF_ROOT: terraform/live/production
+  TF_VERSION: 1.13.1
+  GCP_REGION: us-central1
+  WIF_PROVIDER: ${{ secrets.GCP_WIF_PROVIDER }}
+  WIF_SERVICE_ACCOUNT: ${{ secrets.GCP_WIF_SERVICE_ACCOUNT }}
 
 jobs:
   force-unlock:
     name: "🔓 Force Unlock State"
     runs-on: ubuntu-latest
-    environment: production           # Ensure it has access to secrets
+    environment: production
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Configure AWS Credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Authenticate to GCP (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
         with:
-          role-to-assume: ${{ env.IAM_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-          role-session-name: Hydra-TF-State-Unlock
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.WIF_SERVICE_ACCOUNT }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -43,16 +42,10 @@ jobs:
       - name: Terraform Init
         working-directory: ${{ env.TF_ROOT }}
         run: terraform init
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
       - name: Terraform Force Unlock
         working-directory: ${{ env.TF_ROOT }}
-        # The -force flag is required to bypass the manual confirmation prompt in CI/CD
         run: terraform force-unlock -force ${{ github.event.inputs.lock_id }}
-        env:
-          TF_VAR_my_ip: ${{ secrets.ADMIN_IP_CIDR }}
-          TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
-      - name: Professional Status Update
+      - name: Status Update
         run: echo "State lock ${{ github.event.inputs.lock_id }} has been forcibly released. You may now resume standard deployments."

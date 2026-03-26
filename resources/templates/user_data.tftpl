@@ -1,10 +1,10 @@
 #!/bin/bash
 # -----------------------------------------------------------------------------
-# PROJECT HYDRA: MYTHIC C2 BOOTSTRAP (MK.I)
+# PROJECT HYDRA: MYTHIC C2 BOOTSTRAP (GCP Edition)
 # -----------------------------------------------------------------------------
 
 mkdir -p /opt/hydra/stages
-exec > >(tee /var/log/hydra-installer.log|logger -t user-data -s 2>/dev/console) 2>&1
+exec > >(tee /var/log/hydra-installer.log|logger -t startup-script -s 2>/dev/console) 2>&1
 
 echo "[*] Bootstrapping Python Environment..."
 export DEBIAN_FRONTEND=noninteractive
@@ -15,11 +15,11 @@ apt-get update && apt-get install -y python3 python3-pip
 # ==============================================================================
 cat <<EOF > /opt/hydra/config.py
 class Config:
-    S3_BUCKET = "${s3_bucket_name}"
-    AWS_REGION = "${aws_region}"
+    GCS_BUCKET = "${gcs_bucket_name}"
+    GCP_PROJECT = "${gcp_project_id}"
     MYTHIC_DIR = "/opt/Mythic"
-    # Port 8181 is the  dedicated C2 lane (avoids Hasura collision)
-    C2_INTERNAL_PORT = 8181 
+    # Port 8181 is the dedicated C2 lane (avoids Hasura collision)
+    C2_INTERNAL_PORT = 8181
 EOF
 
 # ==============================================================================
@@ -59,13 +59,15 @@ import os
 
 def apply():
     logging.info(">>> STAGE 1: System Prep")
-    Shell.run("apt-get update && apt-get install -y nginx curl wget jq unzip net-tools git make")
+    Shell.run("apt-get update && apt-get install -y nginx curl wget jq unzip net-tools git make apt-transport-https ca-certificates gnupg")
     Shell.run("systemctl start nginx && systemctl enable nginx")
-    
-    if not os.path.exists("/usr/local/bin/aws"):
-        Shell.run("curl 'https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip' -o 'awscliv2.zip'")
-        Shell.run("unzip -q awscliv2.zip && ./aws/install && rm -rf aws awscliv2.zip")
-    
+
+    # Install Google Cloud SDK (replaces AWS CLI)
+    if not os.path.exists("/usr/bin/gcloud"):
+        Shell.run("echo 'deb [signed-by=/usr/share/keyrings/cloud.google.asc] https://packages.cloud.google.com/apt cloud-sdk main' | tee /etc/apt/sources.list.d/google-cloud-sdk.list")
+        Shell.run("curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | tee /usr/share/keyrings/cloud.google.asc")
+        Shell.run("apt-get update && apt-get install -y google-cloud-cli")
+
     if not os.path.exists("/swapfile"):
         Shell.run("fallocate -l 4G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile")
         Shell.run("echo '/swapfile none swap sw 0 0' >> /etc/fstab")
@@ -83,7 +85,7 @@ def apply():
     if not os.path.exists("/usr/bin/docker"):
         Shell.run("curl -fsSL https://get.docker.com | sh")
         Shell.run("systemctl enable docker && systemctl start docker")
-        
+
     # Mythic requires docker-compose plugin
     Shell.run("apt-get install -y docker-compose-plugin")
 EOF
@@ -99,42 +101,42 @@ import time
 
 def apply():
     logging.info(">>> STAGE 3: Mythic Deployment & Phoenix Restore")
-    
-    restore_cmd = f"aws s3 cp s3://{Config.S3_BUCKET}/backups/latest_mythic_state.tar.gz /tmp/mythic_backup.tar.gz --region {Config.AWS_REGION}"
-    
+
+    restore_cmd = f"gsutil cp gs://{Config.GCS_BUCKET}/backups/latest_mythic_state.tar.gz /tmp/mythic_backup.tar.gz"
+
     if Shell.run(restore_cmd, check=False):
-        logging.info("[*] State found in S3! Restoring full Mythic environment...")
+        logging.info("[*] State found in GCS! Restoring full Mythic environment...")
         Shell.run("rm -rf /opt/Mythic", check=False)
         Shell.run("tar -xzvf /tmp/mythic_backup.tar.gz -C /opt/", check=False)
         Shell.run("make", cwd=Config.MYTHIC_DIR)
-        
+
         logging.info("[*] Starting restored Mythic instance...")
         Shell.run("./mythic-cli start", cwd=Config.MYTHIC_DIR)
-        
+
     else:
         logging.info("[!] No backup found. Initiating fresh Mythic installation...")
         if not os.path.exists(Config.MYTHIC_DIR):
             Shell.run(f"git clone https://github.com/its-a-feature/Mythic.git {Config.MYTHIC_DIR}")
-        
+
         Shell.run("make", cwd=Config.MYTHIC_DIR)
         Shell.run("./mythic-cli install github https://github.com/MythicAgents/Apollo.git", cwd=Config.MYTHIC_DIR)
         Shell.run("./mythic-cli install github https://github.com/MythicC2Profiles/http.git", cwd=Config.MYTHIC_DIR)
-        
+
         # --- ZERO TOUCH FIX: HARDCODE THE PORT ---
         logging.info("[*] Patching HTTP Profile to use Port 8181...")
         http_config = f"{Config.MYTHIC_DIR}/InstalledServices/http/c2_code/config.json"
         Shell.run(f"sed -i 's/\"port\": 80/\"port\": {Config.C2_INTERNAL_PORT}/g' {http_config}", check=False)
-        
+
         logging.info("[*] Building Mythic Containers...")
         Shell.run("./mythic-cli start", cwd=Config.MYTHIC_DIR)
-        
+
         logging.info("[*] Waiting for Docker registry settlement...")
         time.sleep(15)
         Shell.run("docker compose -f docker-compose.yml up -d", cwd=Config.MYTHIC_DIR)
-    
+
     backup_script = f"""#!/bin/bash
 tar -czf /tmp/mythic_backup.tar.gz -C /opt Mythic
-aws s3 cp /tmp/mythic_backup.tar.gz s3://{Config.S3_BUCKET}/backups/latest_mythic_state.tar.gz --region {Config.AWS_REGION}
+gsutil cp /tmp/mythic_backup.tar.gz gs://{Config.GCS_BUCKET}/backups/latest_mythic_state.tar.gz
 """
     with open("/usr/local/bin/hydra-backup.sh", "w") as f: f.write(backup_script)
     Shell.run("chmod +x /usr/local/bin/hydra-backup.sh")
@@ -148,14 +150,14 @@ from core import Shell, logging
 from config import Config
 
 def apply():
-    logging.info(">>> STAGE 4: Proxy & ALB Integration")
-    
-    # Nginx catches ALB health checks (200 OK) and proxies C2 traffic to 8080
+    logging.info(">>> STAGE 4: Proxy & LB Integration")
+
+    # Nginx catches LB health checks (200 OK) and proxies C2 traffic to 8181
     nginx_conf = f"""
 server {{
     listen 80 default_server;
     server_name _;
-    
+
     location / {{
         proxy_pass http://127.0.0.1:{Config.C2_INTERNAL_PORT};
         proxy_set_header Host \$host;
@@ -167,7 +169,7 @@ server {{
 """
     with open("/etc/nginx/sites-available/default", "w") as f:
         f.write(nginx_conf)
-        
+
     Shell.run("systemctl restart nginx")
     logging.info("PROJECT HYDRA (MYTHIC) IS LIVE.")
 EOF

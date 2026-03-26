@@ -1,11 +1,27 @@
-variable "aws_region" {
-  description = "AWS Region"
+variable "gcp_project_id" {
+  description = "GCP Project ID"
   type        = string
-  default     = "us-east-2" # CHANGED FROM us-east-1 to Ohio
+}
+
+variable "gcp_region" {
+  description = "GCP Region"
+  type        = string
+  default     = "us-central1"
+}
+
+variable "gcp_zone" {
+  description = "GCP Zone for zonal resources"
+  type        = string
+  default     = "us-central1-a"
 }
 
 variable "my_ip" {
   description = "Your IP address for SSH access (CIDR format, e.g., 1.2.3.4/32)"
+  type        = string
+}
+
+variable "public_key" {
+  description = "The public SSH key string (e.g., ssh-ed25519 AAAA... user@host)"
   type        = string
 }
 
@@ -16,20 +32,11 @@ variable "cloudflare_api_token" {
 }
 
 variable "cloudflare_zone_id" {
-  description = "Zone ID for Cloudflare (Optional if using only workers.dev)"
+  description = "Zone ID for googleupdate.uk domain"
   type        = string
   default     = ""
 }
 
-variable "public_key_path" {
-  description = "Path to the public SSH key"
-  type        = string
-  default     = "../../../hydra_key.pub"
-}
-variable "public_key" {
-  description = "The public SSH key string"
-  type        = string
-}
 variable "cloudflare_account_id" {
   description = "Cloudflare Account ID"
   type        = string

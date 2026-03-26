@@ -1,4 +1,4 @@
-name: "Project Hydra: Infrastructure Dispatch (OIDC)"
+name: "Project Hydra: Infrastructure Dispatch (GCP)"
 
 on:
   push:
@@ -26,16 +26,18 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  id-token: write   # Required for requesting the JWT
+  id-token: write   # Required for GCP Workload Identity Federation
   contents: read    # Required for actions/checkout
   pull-requests: write
 
 env:
-  TF_ROOT: terraform/live/production  # Updated to match Phase 6
-  TF_VERSION: 1.13.1                  # Updated to latest stable
-  AWS_REGION: us-east-1 
-  # REPLACE WITH YOUR ACCOUNT ID
-  IAM_ROLE_ARN: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHubActionsRole
+  TF_ROOT: terraform/live/production
+  TF_VERSION: 1.13.1
+  GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  GCP_REGION: us-central1
+  # Workload Identity Provider for GitHub Actions
+  WIF_PROVIDER: ${{ secrets.GCP_WIF_PROVIDER }}
+  WIF_SERVICE_ACCOUNT: ${{ secrets.GCP_WIF_SERVICE_ACCOUNT }}
 
 jobs:
   lint-and-scan:
@@ -44,21 +46,21 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-        
+
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
-          
+
       - name: Terraform Format Check
-        run: terraform fmt -recursive
+        run: terraform fmt -recursive -check
         working-directory: .
-        
+
       - name: Run tfsec
         uses: aquasecurity/tfsec-action@v1.0.0
         with:
           working_directory: terraform/modules
-          soft_fail: true # Set to false to block builds on security issues
+          soft_fail: true
 
   terraform-plan:
     name: "📝 Terraform Plan"
@@ -67,13 +69,12 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-        
-      - name: Configure AWS Credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+
+      - name: Authenticate to GCP (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
         with:
-          role-to-assume: ${{ env.IAM_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-          role-session-name: Hydra-TF-Plan
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.WIF_SERVICE_ACCOUNT }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -93,43 +94,34 @@ jobs:
       - name: Disable Lifecycle Guard (Full Burn Only)
         if: github.event.inputs.action == 'full_burn'
         run: |
-          # Removes prevent_destroy and enables force_destroy on the S3 Vault
-          sed -i 's/prevent_destroy = true/prevent_destroy = false/g' terraform/modules/aws/storage/main.tf
-          sed -i 's/force_destroy = false/force_destroy = true/g' terraform/modules/aws/storage/main.tf
+          sed -i 's/prevent_destroy = true/prevent_destroy = false/g' terraform/modules/gcp/storage/main.tf
+          sed -i 's/force_destroy = false/force_destroy = true/g' terraform/modules/gcp/storage/main.tf
+          sed -i 's/prevent_destroy = true/prevent_destroy = false/g' terraform/modules/gcp/kms/main.tf
 
-      # --- SURGICAL LOGIC: RE-ROLLING ASG ---
+      # --- SURGICAL LOGIC: RE-ROLLING MIG ---
       - name: Taint Resources (Redeploy)
         if: github.event.inputs.action == 'redeploy_c2_node'
         working-directory: ${{ env.TF_ROOT }}
         run: |
-          # Tainting the Launch Template forces the ASG to see a "new" version
-          # This triggers the Instance Refresh defined in Phase 5
-          terraform taint module.autoscaling.aws_launch_template.c2_template || true
-          
-      - name: Terraform Refresh
-        working-directory: ${{ env.TF_ROOT }}
-        env:
-          TF_VAR_my_ip: ${{ secrets.ADMIN_IP_CIDR }}
-          TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          TF_VAR_cloudflare_account_id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          TF_VAR_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
-        run: terraform refresh
+          # Tainting the Instance Template forces MIG to create new instances
+          terraform taint module.autoscaling.google_compute_instance_template.c2_template || true
 
       - name: Terraform Plan
         id: plan
         working-directory: ${{ env.TF_ROOT }}
         env:
           TF_VAR_my_ip: ${{ secrets.ADMIN_IP_CIDR }}
+          TF_VAR_gcp_project_id: ${{ secrets.GCP_PROJECT_ID }}
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           TF_VAR_cloudflare_account_id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          TF_VAR_cloudflare_zone_id: ${{ secrets.CLOUDFLARE_ZONE_ID }}
           TF_VAR_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
         run: |
           if [ "${{ github.event.inputs.action }}" == "destroy_ephemeral" ]; then
-            # Target only the "Frontend" modules, leaving Storage (S3) and Identity (IAM) intact
+            # Target only compute/network, leaving Storage (GCS) and IAM intact
             terraform plan -destroy \
               -target=module.autoscaling \
               -target=module.load_balancing \
-              -target=module.cdn \
               -target=module.security \
               -out=tfplan
           elif [ "${{ github.event.inputs.action }}" == "full_burn" ]; then
@@ -144,25 +136,23 @@ jobs:
           name: tfplan-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.TF_ROOT }}/tfplan
           retention-days: 1
-          overwrite: true 
+          overwrite: true
 
   terraform-apply:
     name: "🚀 Terraform Apply"
     needs: terraform-plan
-    # Run on main push OR if manual action is triggered (excluding 'plan' only)
     if: (github.ref == 'refs/heads/main' && github.event_name != 'pull_request') || (github.event_name == 'workflow_dispatch' && github.event.inputs.action != 'plan')
     runs-on: ubuntu-latest
     environment: production
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-        
-      - name: Configure AWS Credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+
+      - name: Authenticate to GCP (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
         with:
-          role-to-assume: ${{ env.IAM_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-          role-session-name: Hydra-TF-Apply
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.WIF_SERVICE_ACCOUNT }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -177,8 +167,9 @@ jobs:
       - name: Disable Lifecycle Guard (Full Burn Only)
         if: github.event.inputs.action == 'full_burn'
         run: |
-          sed -i 's/prevent_destroy = true/prevent_destroy = false/g' terraform/modules/aws/storage/main.tf
-          sed -i 's/force_destroy = false/force_destroy = true/g' terraform/modules/aws/storage/main.tf
+          sed -i 's/prevent_destroy = true/prevent_destroy = false/g' terraform/modules/gcp/storage/main.tf
+          sed -i 's/force_destroy = false/force_destroy = true/g' terraform/modules/gcp/storage/main.tf
+          sed -i 's/prevent_destroy = true/prevent_destroy = false/g' terraform/modules/gcp/kms/main.tf
 
       - name: Download Plan Artifact
         uses: actions/download-artifact@v4
@@ -190,7 +181,9 @@ jobs:
         working-directory: ${{ env.TF_ROOT }}
         env:
           TF_VAR_my_ip: ${{ secrets.ADMIN_IP_CIDR }}
+          TF_VAR_gcp_project_id: ${{ secrets.GCP_PROJECT_ID }}
           TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           TF_VAR_cloudflare_account_id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          TF_VAR_cloudflare_zone_id: ${{ secrets.CLOUDFLARE_ZONE_ID }}
           TF_VAR_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
         run: terraform apply -auto-approve tfplan

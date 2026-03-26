@@ -1,64 +1,71 @@
-name: 'Destroy Dev Environment'
+name: "Project Hydra: Destroy Environment"
 
 on:
   workflow_dispatch:
     inputs:
       confirmation:
-        description: 'MANDATORY: To prevent accidental destruction, type "destroy" to confirm.'
+        description: 'MANDATORY: Type "destroy" to confirm.'
         required: true
         default: 'do-not-destroy'
 
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  TF_ROOT: terraform/live/production
+  TF_VERSION: 1.13.1
+  GCP_REGION: us-central1
+  WIF_PROVIDER: ${{ secrets.GCP_WIF_PROVIDER }}
+  WIF_SERVICE_ACCOUNT: ${{ secrets.GCP_WIF_SERVICE_ACCOUNT }}
+
 jobs:
   terraform-destroy:
-    name: 'Terraform Destroy Dev'
+    name: "💀 Terraform Destroy"
     runs-on: ubuntu-latest
-    
-    environment: dev
-
-    env:
-      AWS_REGION: ${{ secrets.AWS_REGION }}
-      TF_WORKING_DIR: 'environments/dev'
-      CONFIRMATION_PHRASE: "destroy"
-
-    permissions:
-      id-token: write
-      contents: read
+    environment: production
 
     steps:
-      - name: 'Checkout Repository'
-        uses: actions/checkout@v4
-
-      - name: 'Configure AWS Credentials (OIDC)'
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::456202167790:role/githubaction
-          aws-region: ${{ env.AWS_REGION }}
-          role-session-name: GitHubActions-Terraform-Destroy
-
-      # --- THIS IS THE FIX ---
-      - name: 'Create Dummy Lambda Artifacts for Destroy'
-        working-directory: ${{ env.TF_WORKING_DIR }}
+      - name: Verify Destroy Confirmation
         run: |
-          touch image-processing.zip
-          touch search-by-label.zip
-          echo "Created dummy zip files to allow terraform destroy to run."
-
-      - name: 'Set up Terraform'
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: 1.13.1
-
-      - name: 'Terraform Init'
-        run: terraform -chdir="${{ env.TF_WORKING_DIR }}" init -backend-config="bucket=${{ secrets.TF_STATE_BUCKET_DEV }}"
-
-      - name: 'Verify Destroy Confirmation'
-        run: |
-          if [ "${{ github.event.inputs.confirmation }}" != "${{ env.CONFIRMATION_PHRASE }}" ]; then
+          if [ "${{ github.event.inputs.confirmation }}" != "destroy" ]; then
             echo "❌ ERROR: Confirmation phrase did not match. Aborting workflow."
             exit 1
           else
             echo "✅ Confirmation phrase matches. Proceeding with destroy operation."
           fi
-      
-      - name: 'Terraform Destroy'
-        run: terraform -chdir="${{ env.TF_WORKING_DIR }}" destroy -auto-approve
+
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.WIF_SERVICE_ACCOUNT }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_ROOT }}
+        run: terraform init
+
+      - name: Disable Lifecycle Guards
+        run: |
+          sed -i 's/prevent_destroy = true/prevent_destroy = false/g' terraform/modules/gcp/storage/main.tf
+          sed -i 's/force_destroy = false/force_destroy = true/g' terraform/modules/gcp/storage/main.tf
+          sed -i 's/prevent_destroy = true/prevent_destroy = false/g' terraform/modules/gcp/kms/main.tf
+
+      - name: Terraform Destroy
+        working-directory: ${{ env.TF_ROOT }}
+        env:
+          TF_VAR_my_ip: ${{ secrets.ADMIN_IP_CIDR }}
+          TF_VAR_gcp_project_id: ${{ secrets.GCP_PROJECT_ID }}
+          TF_VAR_cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          TF_VAR_cloudflare_account_id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          TF_VAR_cloudflare_zone_id: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+          TF_VAR_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+        run: terraform destroy -auto-approve

@@ -1,16 +1,14 @@
 terraform {
   required_version = ">= 1.13.1"
-  backend "s3" {
-    bucket         = "ysak-terraform-state-bucket-red-team"
-    key            = "hydra/dev/terraform.tfstate"
-    region         = "us-east-1" 
-    encrypt        = true
-    use_lockfile   = true
+
+  backend "gcs" {
+    bucket = "hydra-terraform-state"
+    prefix = "hydra/production/terraform.tfstate"
   }
 
   required_providers {
-    aws = {
-      source  = "hashicorp/aws"
+    google = {
+      source  = "hashicorp/google"
       version = "~> 6.0"
     }
     cloudflare = {
@@ -29,24 +27,21 @@ terraform {
       source  = "hashicorp/local"
       version = "~> 2.0"
     }
-    template = {
-      source  = "hashicorp/template"
-      version = "~> 2.2"
-    }
-  }
-  
-}
-provider "aws" {
-  region = var.aws_region
-  
-  default_tags {
-    tags = {
-      Project     = "Hydra"
-      Environment = "Dev"
-      ManagedBy   = "Terraform"
-    }
   }
 }
+
+provider "google" {
+  project = var.gcp_project_id
+  region  = var.gcp_region
+  zone    = var.gcp_zone
+
+  default_labels = {
+    project     = "hydra"
+    environment = "production"
+    managed_by  = "terraform"
+  }
+}
+
 provider "cloudflare" {
   api_token = var.cloudflare_api_token
 }
