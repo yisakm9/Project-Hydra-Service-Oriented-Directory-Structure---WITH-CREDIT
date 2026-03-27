@@ -11,7 +11,33 @@ Designed for Senior Red Team engagements, this architecture prioritizes operatio
 The infrastructure relies entirely on GCP-native services and Cloudflare to obscure the true origin of the C2 server. 
 
 ### Traffic Flow (OpSec Chain)
-1. **Victim Payload** calls out to `https://googleupdate.uk` (Cloudflare).
+
+```mermaid
+graph TD
+    %% Define Nodes
+    A[Victim Payload] -->|HTTPS :443| B(Cloudflare Edge)
+    
+    subgraph Edge Layer [External Obfuscation]
+        B -->|Host: googleupdate.uk| C{{Cloudflare Worker}}
+        C -.->|Strips Headers: Via, Server| C
+    end
+    
+    C -->|HTTP :80| D(GCP External Load Balancer)
+    
+    subgraph Target Network [Google Cloud Platform]
+        D -->|HTTP :80| E[Managed Instance Group]
+        E -->|Port 80| F[Nginx Proxy]
+        F -->|Proxies to 8181| G[(Mythic C2 Core)]
+        F -.->|Health Check/200 OK| D
+    end
+    
+    %% Styling
+    style A fill:#ffcccc,stroke:#ff0000,stroke-width:2px
+    style C fill:#f9a826,stroke:#333,stroke-width:2px
+    style G fill:#ccffcc,stroke:#00aa00,stroke-width:2px
+```
+
+1. **Victim Payload** calls out to `https://googleupdate.uk` (Cloudflare Edge).
 2. **Cloudflare Worker** (`ghost_proxy.js`) intercepts the request, scrubs tracking headers, and forwards traffic to the GCP Load Balancer.
 3. **GCP External HTTP Load Balancer** receives the request, utilizing Cloud CDN (configured for pass-through/zero-cache).
 4. **Nginx Reverse Proxy** on the C2 instance intercepts the request on Port `80`, answering LB Health Checks directly, while silently proxying payload traffic to `http://127.0.0.1:8181`.
@@ -69,6 +95,7 @@ cloudflare_account_id = "..."
 cloudflare_zone_id    = "..."
 public_key            = "ssh-ed25519 AAAA..."
 ```
+> **Note on DNS:** Terraform will use your `cloudflare_zone_id` to automatically create a Proxied `A` record pointing whatever domain you own in Cloudflare to your ephemeral GCP Load Balancer IP. This makes the architecture completely future-proof—if the Load Balancer IP shifts, Terraform will handle the DNS rotation during the next apply.
 
 ### Step 3: CI/CD Setup
 Set up the Workload Identity Pool and connect it to your GitHub repository. Export the WIF credentials to your GitHub Secrets:
