@@ -120,6 +120,7 @@ def apply():
 
         Shell.run("make", cwd=Config.MYTHIC_DIR)
         Shell.run("./mythic-cli install github https://github.com/MythicAgents/Apollo.git", cwd=Config.MYTHIC_DIR)
+        Shell.run("./mythic-cli install github https://github.com/MythicAgents/poseidon.git", cwd=Config.MYTHIC_DIR)
         Shell.run("./mythic-cli install github https://github.com/MythicC2Profiles/http.git", cwd=Config.MYTHIC_DIR)
 
         # --- ZERO TOUCH FIX: HARDCODE THE PORT ---
