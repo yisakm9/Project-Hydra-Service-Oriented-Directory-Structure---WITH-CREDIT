@@ -42,7 +42,7 @@ resource "cloudflare_workers_route" "c2_route" {
 # Automatically point googleupdate.uk to the ephemeral Load Balancer IP on every deployment
 resource "cloudflare_record" "c2_domain_root" {
   zone_id = var.cloudflare_zone_id
-  name    = "googleupdate.uk"
+  name    = "@"
   content   = var.c2_backend_url
   type    = "A"
   proxied = true
