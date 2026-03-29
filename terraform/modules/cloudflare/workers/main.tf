@@ -47,3 +47,14 @@ resource "cloudflare_record" "c2_domain_root" {
   type    = "A"
   proxied = true
 }
+
+# --- Future-Proof SSL Enforcement ---
+# Automatically forces the domain to use "Flexible" SSL mode so you never have to click 
+# through the Cloudflare UI on newly purchased domains.
+resource "cloudflare_zone_settings_override" "c2_settings" {
+  zone_id = var.cloudflare_zone_id
+  settings {
+    ssl = "flexible"
+    always_use_https = "on"
+  }
+}
