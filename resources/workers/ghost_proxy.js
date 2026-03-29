@@ -5,29 +5,21 @@
  */
 export default {
   async fetch(request, env) {
-    const originalUrl = new URL(request.url);
-    const targetUrl = new URL(env.C2_BACKEND);
+    const proxyHeaders = new Headers(request.headers);
 
-    // Copy the path and query parameters to the GCP destination
-    targetUrl.pathname = originalUrl.pathname;
-    targetUrl.search = originalUrl.search;
+    // Scrub standard Cloudflare & tracing headers from the inbound request
+    proxyHeaders.delete("CF-Connecting-IP");
+    proxyHeaders.delete("True-Client-IP");
+    proxyHeaders.delete("X-Forwarded-For");
+    proxyHeaders.delete("CF-Ray");
+    proxyHeaders.delete("CF-IPCountry");
+    proxyHeaders.delete("CF-Visitor");
+    proxyHeaders.delete("CDN-Loop");
 
-    // Create a new Headers object to sanitize the request
-    const proxyHeaders = new Headers();
-
-    // Copy all safe headers from the implant, strictly dropping the Host and Cloudflare trace headers
-    for (const [key, value] of request.headers.entries()) {
-      const lowerKey = key.toLowerCase();
-      if (lowerKey !== 'host' && !lowerKey.startsWith('cf-') && lowerKey !== 'x-forwarded-proto') {
-        proxyHeaders.set(key, value);
-      }
-    }
-
-    // Build the clean request
-    const proxyRequest = new Request(targetUrl.toString(), {
+    // Build the request pointing natively to the same URL (relies on Cloudflare A record -> GCP Port 80 Flexible SSL)
+    const proxyRequest = new Request(request.url, {
       method: request.method,
       headers: proxyHeaders,
-      // Only attach body if it's a POST/PUT request
       body: (request.method !== 'GET' && request.method !== 'HEAD') ? request.body : null,
       redirect: 'manual'
     });
